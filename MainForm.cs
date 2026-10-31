@@ -38,6 +38,23 @@ public sealed class MainForm : Form
     private readonly Button waveRunButton = new() { Text = "开始波形采集", AutoSize = true, Enabled = false };
     private readonly Label waveInfo = new() { AutoSize = true, Text = "选择通道后开始采集" };
 
+    // 编码器 UI
+    private readonly CheckBox encoderEnableCheck = new() { Text = "启用角度解算", AutoSize = true, Padding = new Padding(0, 6, 8, 0) };
+    private readonly ComboBox[] encoderBoxes = new ComboBox[6];
+    private readonly NumericUpDown encoderLinesBox = new() { Minimum = 1, Maximum = 100000, Value = 1250, Width = 90 };
+    private readonly CheckBox encoderInvertZCheck = new() { Text = "Z 极性反转", AutoSize = true, Padding = new Padding(0, 6, 8, 0) };
+    private readonly CheckBox encoderAutoCenterCheck = new() { Text = "自动慢速去偏", AutoSize = true, Padding = new Padding(0, 6, 8, 0) };
+    private readonly NumericUpDown offsetABox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 0, Width = 80 };
+    private readonly NumericUpDown offsetBBox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 0, Width = 80 };
+    private readonly NumericUpDown offsetZBox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 0, Width = 80 };
+    private readonly Button encoderResetButton = new() { Text = "角度清零", AutoSize = true };
+    private readonly Label encoderAngleLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 32, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderSpeedLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 32, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderDirLabel = new() { AutoSize = false, Text = "未启用", Font = new Font("Microsoft YaHei UI", 32, FontStyle.Bold), ForeColor = Color.DimGray, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderTurnsLabel = new() { AutoSize = true, Text = "累计 — · Z 脉冲 —", ForeColor = Color.DimGray, Padding = new Padding(0, 4, 20, 0) };
+    private readonly Label encoderABZLabel = new() { AutoSize = true, Text = "A=— B=— Z=—", ForeColor = Color.DimGray, Padding = new Padding(0, 4, 0, 0) };
+    private readonly Label encoderDiagLabel = new() { AutoSize = true, Text = "", ForeColor = Color.DimGray, Font = new Font("Microsoft YaHei UI", 8.5f), Padding = new Padding(0, 4, 0, 0) };
+
     private SerialPort? serial;
     private Ftd2xxUsb? usb;
     private bool IsUsb => connectionBox.SelectedIndex == 1;
@@ -46,7 +63,8 @@ public sealed class MainForm : Form
     private readonly object historyLock = new();
     private readonly List<Sample> history = new();
     private readonly object ioLock = new();
-    private long frameIndexCounter;   // 全局帧序号（Interlocked），UART/USB 通用
+    private long frameIndexCounter;
+    private readonly EncoderState encoder = new();
     private static readonly Color[] ChannelColors = { Color.DodgerBlue, Color.OrangeRed, Color.SeaGreen, Color.MediumPurple, Color.DarkOrange, Color.DeepPink, Color.Teal, Color.SaddleBrown };
 
     private CancellationTokenSource? pollCts;
@@ -85,11 +103,9 @@ public sealed class MainForm : Form
         waveRangeBox.SelectedIndexChanged += (_, _) => waveform.Invalidate();
         waveCenterBox.ValueChanged += (_, _) => waveform.Invalidate();
         windowBox.Items.AddRange(new object[] {
-            "50 µs", "100 µs", "500 µs",
-            "1 ms", "5 ms", "10 ms", "20 ms", "50 ms",
-            "100 ms", "500 ms", "1 s", "5 s"
+            "50 µs", "100 µs", "500 µs", "1 ms", "5 ms", "10 ms", "20 ms", "50 ms", "100 ms", "500 ms", "1 s", "5 s"
         });
-        windowBox.SelectedIndex = 5;   // 默认 10 ms
+        windowBox.SelectedIndex = 5;
         windowBox.SelectedIndexChanged += (_, _) => waveform.Invalidate();
         for (int i = 0; i < 8; i++)
         {
@@ -98,6 +114,15 @@ public sealed class MainForm : Form
             waveChecks[i].CheckedChanged += (_, _) => waveform.Invalidate();
         }
         channelBox.SelectedIndex = 0;
+
+        for (int i = 0; i < 6; i++)
+        {
+            encoderBoxes[i] = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90 };
+            encoderBoxes[i].Items.Add("未使用");
+            for (int ch = 0; ch < 8; ch++) encoderBoxes[i].Items.Add($"通道 {ch + 1}");
+            encoderBoxes[i].SelectedIndex = i + 1;
+        }
+
         BuildLayout(); RefreshPorts();
         refreshButton.Click += (_, _) => RefreshPorts();
         connectButton.Click += (_, _) => ToggleConnection();
@@ -106,6 +131,7 @@ public sealed class MainForm : Form
         allOnceButton.Click += async (_, _) => await ReadChannelsAsync(false);
         oneOnceButton.Click += async (_, _) => await ReadChannelsAsync(false);
         waveRunButton.Click += (_, _) => { if (mode == ReadMode.Waveform) StopPolling(); else SetMode(ReadMode.Waveform); };
+        encoderResetButton.Click += (_, _) => encoder.ZeroAngle();
         waveform.Paint += DrawWaveform;
         FormClosing += (_, _) =>
         {
@@ -165,7 +191,105 @@ public sealed class MainForm : Form
         waveLayout.Controls.Add(waveTools, 0, 0);
         waveform.Dock = DockStyle.Fill; waveform.BackColor = Color.White; waveform.Margin = new Padding(0, 8, 0, 8); waveLayout.Controls.Add(waveform, 0, 1);
         waveInfo.Padding = new Padding(0, 4, 0, 0); waveLayout.Controls.Add(waveInfo, 0, 2);
-        waveTab.Controls.Add(waveLayout); tabs.TabPages.Add(waveTab); root.Controls.Add(tabs, 0, 1);
+        waveTab.Controls.Add(waveLayout); tabs.TabPages.Add(waveTab);
+
+        BuildEncoderTab(tabs);
+        root.Controls.Add(tabs, 0, 1);
+    }
+
+    private void BuildEncoderTab(TabControl tabs)
+    {
+        var page = new TabPage("编码器解算") { BackColor = BackColor };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14), RowCount = 5, ColumnCount = 1 };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var row1 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
+        row1.Controls.Add(encoderEnableCheck);
+        row1.Controls.Add(new Label { Text = "A+", AutoSize = true, Padding = new Padding(12, 7, 2, 0), ForeColor = Color.DodgerBlue, Font = new Font(Font, FontStyle.Bold) });
+        row1.Controls.Add(encoderBoxes[0]);
+        row1.Controls.Add(new Label { Text = "A-", AutoSize = true, Padding = new Padding(6, 7, 2, 0), ForeColor = Color.DodgerBlue });
+        row1.Controls.Add(encoderBoxes[1]);
+        row1.Controls.Add(new Label { Text = "B+", AutoSize = true, Padding = new Padding(12, 7, 2, 0), ForeColor = Color.OrangeRed, Font = new Font(Font, FontStyle.Bold) });
+        row1.Controls.Add(encoderBoxes[2]);
+        row1.Controls.Add(new Label { Text = "B-", AutoSize = true, Padding = new Padding(6, 7, 2, 0), ForeColor = Color.OrangeRed });
+        row1.Controls.Add(encoderBoxes[3]);
+        row1.Controls.Add(new Label { Text = "Z+", AutoSize = true, Padding = new Padding(12, 7, 2, 0), ForeColor = Color.SeaGreen, Font = new Font(Font, FontStyle.Bold) });
+        row1.Controls.Add(encoderBoxes[4]);
+        row1.Controls.Add(new Label { Text = "Z-", AutoSize = true, Padding = new Padding(6, 7, 2, 0), ForeColor = Color.SeaGreen });
+        row1.Controls.Add(encoderBoxes[5]);
+        root.Controls.Add(row1, 0, 0);
+
+        var row2 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 6, 0, 6) };
+        row2.Controls.Add(new Label { Text = "每转线数：", AutoSize = true, Padding = new Padding(0, 6, 2, 0) });
+        row2.Controls.Add(encoderLinesBox);
+        row2.Controls.Add(new Label { Text = "偏置A(V)：", AutoSize = true, Padding = new Padding(12, 6, 2, 0) });
+        row2.Controls.Add(offsetABox);
+        row2.Controls.Add(new Label { Text = "B(V)：", AutoSize = true, Padding = new Padding(6, 6, 2, 0) });
+        row2.Controls.Add(offsetBBox);
+        row2.Controls.Add(new Label { Text = "Z(V)：", AutoSize = true, Padding = new Padding(6, 6, 2, 0) });
+        row2.Controls.Add(offsetZBox);
+        row2.Controls.Add(encoderInvertZCheck);
+        row2.Controls.Add(encoderAutoCenterCheck);
+        row2.Controls.Add(encoderResetButton);
+        root.Controls.Add(row2, 0, 1);
+
+        var big = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
+        big.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+        big.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+        big.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+        big.Controls.Add(MakeBigCard("绝对角度", encoderAngleLabel, Color.DodgerBlue), 0, 0);
+        big.Controls.Add(MakeBigCard("转速", encoderSpeedLabel, Color.OrangeRed), 1, 0);
+        big.Controls.Add(MakeBigCard("旋转方向", encoderDirLabel, Color.SeaGreen), 2, 0);
+        root.Controls.Add(big, 0, 2);
+
+        var info = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
+        info.Controls.Add(encoderTurnsLabel);
+        info.Controls.Add(encoderABZLabel);
+        info.Controls.Add(encoderDiagLabel);
+        root.Controls.Add(info, 0, 3);
+
+        var note = new Label
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            Text = "说明：\r\n" +
+                   "  · 速度现在基于实测帧率计算（USB 流模式下标称采样率与实际帧率常有差距，旧版本因此偏差巨大）。\r\n" +
+                   "  · 验证线数：手动转 10 圈，看“累计圈数”是否准确增加 10；不对则修改“每转线数”。\r\n" +
+                   "  · 验证转速：手动转 10 圈并秒表计时，转速 = 10 / 秒数 × 60 rpm；和显示值对比。\r\n" +
+                   "  · 诊断行 dt=xxx ms 应约等于 1/实际帧率（例如 19kHz 时约 0.0526ms，200kHz 时约 0.005ms）。\r\n" +
+                   "  · 未收到 Z 之前角度显示“—(等待Z)”；转一圈让 Z 出现后才显示绝对角度。\r\n" +
+                   "  · 手动慢速测试时不要勾“自动慢速去偏”；偏置手动填写（差分接法填 0，单端接法填共模电压约 2.5）。\r\n" +
+                   "  · 若方向反了，交换 A+/A- 或 B+/B- 的通道映射。",
+            ForeColor = Color.DimGray,
+            Font = new Font(Font.FontFamily, 8.5f),
+            Padding = new Padding(0, 10, 0, 0)
+        };
+        root.Controls.Add(note, 0, 4);
+
+        page.Controls.Add(root);
+        tabs.TabPages.Add(page);
+    }
+
+    private Panel MakeBigCard(string title, Label valueLabel, Color accent)
+    {
+        var panel = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Margin = new Padding(6), BorderStyle = BorderStyle.FixedSingle };
+        panel.Controls.Add(new Label
+        {
+            Text = title,
+            AutoSize = true,
+            Location = new Point(14, 10),
+            ForeColor = accent,
+            Font = new Font(Font.FontFamily, 10, FontStyle.Bold),
+        });
+        valueLabel.Location = new Point(0, 36);
+        valueLabel.Size = new Size(panel.Width - 2, panel.Height - 38);
+        valueLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+        panel.Controls.Add(valueLabel);
+        return panel;
     }
 
     private static void AddLabeled(FlowLayoutPanel panel, string title, Control control)
@@ -239,6 +363,26 @@ public sealed class MainForm : Form
             HistorySpanSeconds: WindowSpanSeconds(),
             SampleRate: (int)sampleRateBox.Value);
 
+        var encCfg = new EncoderConfig
+        {
+            Enabled = encoderEnableCheck.Checked,
+            ChAp = GetEncoderChannel(0),
+            ChAn = GetEncoderChannel(1),
+            ChBp = GetEncoderChannel(2),
+            ChBn = GetEncoderChannel(3),
+            ChZp = GetEncoderChannel(4),
+            ChZn = GetEncoderChannel(5),
+            Lines = (double)encoderLinesBox.Value,
+            InvertZ = encoderInvertZCheck.Checked,
+            AutoCenter = encoderAutoCenterCheck.Checked,
+            OffsetA = (double)offsetABox.Value,
+            OffsetB = (double)offsetBBox.Value,
+            OffsetZ = (double)offsetZBox.Value,
+        };
+        // UART 模式的帧间隔基本等于 intervalMs；USB 模式先给标称值，随后被实测帧率覆盖
+        double initialDtSampleRate = options.IsUsb ? options.SampleRate : 1000.0 / Math.Max(1, options.IntervalMs);
+        encoder.Configure(encCfg, initialDtSampleRate);
+
         pollCts = new CancellationTokenSource();
         var token = pollCts.Token;
 
@@ -254,6 +398,12 @@ public sealed class MainForm : Form
             ReadMode.Single => $"连续读取通道 {channelBox.SelectedIndex + 1} 中",
             _ => IsUsb ? "USB 流模式波形采集中" : "波形采集中"
         }, false);
+    }
+
+    private int GetEncoderChannel(int idx)
+    {
+        int sel = encoderBoxes[idx].SelectedIndex;
+        return sel <= 0 ? -1 : sel - 1;
     }
 
     private void StopPolling()
@@ -288,7 +438,7 @@ public sealed class MainForm : Form
         return parts[1] switch { "µs" => v / 1e6, "ms" => v / 1e3, _ => v };
     }
 
-    // ---------- 帧解析器：AB CD + 16B payload + CRC-8(poly=0x07) ----------
+    // ---------- 帧解析器 ----------
 
     private sealed class FrameParser
     {
@@ -315,17 +465,9 @@ public sealed class MainForm : Form
             int i = 0;
             while (i + FrameSize <= len)
             {
-                if (buf[i] != Header0 || buf[i + 1] != Header1)
-                {
-                    i++; DroppedBytes++;
-                    continue;
-                }
+                if (buf[i] != Header0 || buf[i + 1] != Header1) { i++; DroppedBytes++; continue; }
                 byte crc = Crc8(buf, i + 2, PayloadSize);
-                if (crc != buf[i + FrameSize - 1])
-                {
-                    i++; CrcErrors++;
-                    continue;
-                }
+                if (crc != buf[i + FrameSize - 1]) { i++; CrcErrors++; continue; }
                 var payload = new byte[PayloadSize];
                 Buffer.BlockCopy(buf, i + 2, payload, 0, PayloadSize);
                 frames.Add(payload);
@@ -338,8 +480,6 @@ public sealed class MainForm : Form
             }
             return frames;
         }
-
-        public void Reset() { len = 0; }
 
         public static byte Crc8(byte[] data, int offset, int count)
         {
@@ -410,6 +550,7 @@ public sealed class MainForm : Form
                         }
                         long idx = Interlocked.Increment(ref frameIndexCounter);
                         history.Add(new Sample(idx, volts));
+                        encoder.ProcessFrame(volts);
                         if (f == frames.Count - 1) { lastVolts = volts; lastIndex = idx; }
                     }
                     TrimHistory(lastIndex, options.HistorySpanSeconds, options.SampleRate);
@@ -431,12 +572,15 @@ public sealed class MainForm : Form
                         state.RateWindowStart = now;
                         state.BytesWindow = 0;
                         state.FramesWindow = 0;
+
+                        // 用实测帧率更新编码器时间基，修正标称采样率与实际帧率的偏差
+                        if (rateHz > 100)
+                            encoder.UpdateFrameInterval(1.0 / rateHz);
                     }
                     long crcErrors = parser.CrcErrors;
                     long droppedBytes = parser.DroppedBytes;
                     long totalFrames = state.TotalFrames;
                     long totalBytes = state.TotalBytes;
-                    double lastV = 0;
                     var lastSnapshot = new double[8];
                     Array.Copy(lastVolts, lastSnapshot, 8);
 
@@ -456,6 +600,7 @@ public sealed class MainForm : Form
                             lock (historyLock) cached = history.Count;
                             waveInfo.Text = $"流采集中 · 缓存 {cached:N0} 点 · 实际 {rateHz:F0} Hz · {mbPerSec:F2} MB/s";
                         }
+                        UpdateEncoderUi();
                     });
                 }
 
@@ -490,6 +635,34 @@ public sealed class MainForm : Form
             signedLabels[ch].Text = $"有符号值  {signedVal}";
             rawLabels[ch].Text = $"原始值  0x{rawVal:X4}";
         }
+    }
+
+    private void UpdateEncoderUi()
+    {
+        var snap = encoder.GetSnapshot();
+        if (!snap.Valid)
+        {
+            encoderAngleLabel.Text = "—";
+            encoderSpeedLabel.Text = "—";
+            encoderDirLabel.Text = "未启用";
+            encoderDirLabel.ForeColor = Color.DimGray;
+            encoderTurnsLabel.Text = "累计 — · Z 脉冲 —";
+            encoderABZLabel.Text = "A=— B=— Z=—";
+            encoderDiagLabel.Text = "";
+            return;
+        }
+
+        if (!snap.Synced) encoderAngleLabel.Text = "—(等待Z)";
+        else encoderAngleLabel.Text = $"{snap.AngleDeg:F2}°";
+        encoderSpeedLabel.Text = $"{snap.SpeedRpm:F2} rpm";
+
+        if (snap.Direction > 0) { encoderDirLabel.Text = "CW ↻"; encoderDirLabel.ForeColor = Color.SeaGreen; }
+        else if (snap.Direction < 0) { encoderDirLabel.Text = "CCW ↺"; encoderDirLabel.ForeColor = Color.OrangeRed; }
+        else { encoderDirLabel.Text = "静止"; encoderDirLabel.ForeColor = Color.DimGray; }
+
+        encoderTurnsLabel.Text = $"累计 {snap.ContinuousTurns:F3} 圈 · Z 脉冲 {snap.ZPulseCount}";
+        encoderABZLabel.Text = $"A={snap.A:+0.000;-0.000;0.000}V B={snap.B:+0.000;-0.000;0.000}V Z={snap.Z:+0.000;-0.000;0.000}V";
+        encoderDiagLabel.Text = $"原始 A={snap.RawA:+0.000;-0.000;0.000}V B={snap.RawB:+0.000;-0.000;0.000}V Z={snap.RawZ:+0.000;-0.000;0.000}V · 峰值 A={snap.PeakA:F3}V B={snap.PeakB:F3}V · dt={snap.DtPerFrameMs:F4}ms · {(snap.Synced ? "已同步" : "未同步")}";
     }
 
     // ---------- UART 轮询 ----------
@@ -552,7 +725,12 @@ public sealed class MainForm : Form
         if (options.Count == 8)
         {
             long idx = Interlocked.Increment(ref frameIndexCounter);
-            lock (historyLock) { history.Add(new Sample(idx, voltsArr)); TrimHistory(idx, options.HistorySpanSeconds, options.SampleRate); }
+            lock (historyLock)
+            {
+                history.Add(new Sample(idx, voltsArr));
+                encoder.ProcessFrame(voltsArr);
+                TrimHistory(idx, options.HistorySpanSeconds, options.SampleRate);
+            }
         }
         state.RateWindowCount++;
 
@@ -570,6 +748,7 @@ public sealed class MainForm : Form
                     voltageLabels[ch].Text = $"{voltsArr[ch]:+0.0000;-0.0000;0.0000} V";
                 }
                 lastReadLabel.Text = $"最近读取：{nowUi:yyyy-MM-dd HH:mm:ss.fff} · {(options.Count == 8 ? "全部 8 通道" : $"通道 {options.StartChannel + 1}")}";
+                UpdateEncoderUi();
             });
         }
         if (options.Count == 8 && (nowUi - state.LastWaveUpdate).TotalMilliseconds >= 40)
@@ -683,11 +862,8 @@ public sealed class MainForm : Form
         finally { busy = false; UpdateModeButtons(); }
     }
 
-    // ---------- 历史缓冲 & 波形绘制 ----------
-
     private void TrimHistory(long maxIndex, double spanSeconds, int sampleRate)
     {
-        // 保留 2 倍窗口 + 余量，避免频繁裁剪
         long keepPoints = (long)(spanSeconds * sampleRate * 2) + 10000;
         if (keepPoints < 100000) keepPoints = 100000;
         if (keepPoints > 2000000) keepPoints = 2000000;
@@ -736,17 +912,14 @@ public sealed class MainForm : Form
         double spanSeconds = WindowSpanSeconds();
         int sampleRate = (int)sampleRateBox.Value;
 
-        // 时间轴：用帧序号映射，不再依赖 DateTime（避免采样率填错导致波形被压缩）
         long windowPoints = Math.Max(10, (long)(spanSeconds * sampleRate));
 
-        // 网格与纵轴
         for (int i = 0; i <= 4; i++)
         {
             float y = plot.Top + plot.Height * i / 4f; g.DrawLine(gridPen, plot.Left, y, plot.Right, y);
             double v = centerVoltage + halfRange - 2 * halfRange * i / 4.0;
             g.DrawString($"{v:0.###} V", font, labelBrush, 2, y - 8);
         }
-        // 横轴标签：按标称采样率换算名义时间
         for (int i = 0; i <= 4; i++)
         {
             float x = plot.Left + plot.Width * i / 4f; g.DrawLine(gridPen, x, plot.Top, x, plot.Bottom);
@@ -758,7 +931,6 @@ public sealed class MainForm : Form
         bool[] checkedCh = new bool[8];
         for (int i = 0; i < 8; i++) checkedCh[i] = waveChecks[i].Checked;
 
-        // 取时间窗内的点
         Sample[] points;
         long maxIndex;
         lock (historyLock)
@@ -796,7 +968,6 @@ public sealed class MainForm : Form
         {
             if (points.Length == 0) continue;
 
-            // 稀疏：直接连线；密集：每像素列 min-max
             if (points.Length <= width)
             {
                 using var pen = new Pen(ChannelColors[ch], 1.6f);
