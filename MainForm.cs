@@ -5,15 +5,17 @@ namespace Ad7606Host;
 
 public sealed class MainForm : Form
 {
-    private const string UsbSerialNumber = "FTBUT9NG";
-
     private static readonly byte[] UsbStartCmd = { 0xBB, 0x01, 0x00, 0x08 };
     private static readonly byte[] UsbStopCmd = { 0xBB, 0x02 };
 
     private readonly ComboBox portBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
+    private readonly ComboBox usbBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120, Visible = false };
+    private readonly Label portLabel = new() { Text = "串口", AutoSize = true, Padding = new Padding(4, 7, 0, 0) };
+    private readonly Label usbLabel = new() { Text = "USB 序列号", AutoSize = true, Padding = new Padding(4, 7, 0, 0), Visible = false };
     private readonly ComboBox connectionBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 85 };
     private readonly ComboBox baudBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
     private readonly Button refreshButton = new() { Text = "刷新串口", AutoSize = true };
+    private readonly Button usbRefreshButton = new() { Text = "刷新 USB", AutoSize = true, Visible = false };
     private readonly Button connectButton = new() { Text = "连接", AutoSize = true };
     private readonly Button allRunButton = new() { Text = "开始读取全部", AutoSize = true, Enabled = false };
     private readonly Button allOnceButton = new() { Text = "全部单次读取", AutoSize = true, Enabled = false };
@@ -92,6 +94,8 @@ public sealed class MainForm : Form
         connectionBox.Items.AddRange(new object[] { "UART", "USB FIFO" }); connectionBox.SelectedIndex = 0;
         connectionBox.SelectedIndexChanged += (_, _) =>
         {
+            portBox.Visible = !IsUsb; refreshButton.Visible = !IsUsb;
+            portLabel.Visible = !IsUsb; usbBox.Visible = IsUsb; usbLabel.Visible = IsUsb; usbRefreshButton.Visible = IsUsb;
             portBox.Enabled = !IsUsb; baudBox.Enabled = !IsUsb; refreshButton.Enabled = !IsUsb;
             intervalBox.Enabled = !IsUsb;
             AdjustIntervalRange();
@@ -123,8 +127,9 @@ public sealed class MainForm : Form
             encoderBoxes[i].SelectedIndex = i + 1;
         }
 
-        BuildLayout(); RefreshPorts();
+        BuildLayout(); RefreshPorts(); RefreshUsbDevices();
         refreshButton.Click += (_, _) => RefreshPorts();
+        usbRefreshButton.Click += (_, _) => RefreshUsbDevices();
         connectButton.Click += (_, _) => ToggleConnection();
         allRunButton.Click += (_, _) => ToggleMode(ReadMode.All);
         oneRunButton.Click += (_, _) => ToggleMode(ReadMode.Single);
@@ -155,7 +160,8 @@ public sealed class MainForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); Controls.Add(root);
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 0, 0, 10), Margin = Padding.Empty };
         top.Controls.Add(new Label { Text = "AD7606 电压采集", Font = new Font(Font.FontFamily, 17, FontStyle.Bold), AutoSize = true, Margin = new Padding(0, 6, 18, 0) });
-        AddLabeled(top, "连接方式", connectionBox); AddLabeled(top, "串口", portBox); top.Controls.Add(refreshButton); AddLabeled(top, "波特率", baudBox); top.Controls.Add(connectButton);
+        AddLabeled(top, "连接方式", connectionBox); top.Controls.Add(portLabel); top.Controls.Add(portBox); top.Controls.Add(refreshButton);
+        top.Controls.Add(usbLabel); top.Controls.Add(usbBox); top.Controls.Add(usbRefreshButton); AddLabeled(top, "波特率", baudBox); top.Controls.Add(connectButton);
         top.Controls.Add(new Label { Width = 8 }); top.Controls.Add(allRunButton); top.Controls.Add(allOnceButton);
         AddLabeled(top, "单通道", channelBox); top.Controls.Add(oneRunButton); top.Controls.Add(oneOnceButton);
         AddLabeled(top, "量程", rangeBox); AddLabeled(top, "采样间隔 ms", intervalBox); AddLabeled(top, "标称采样率 Hz", sampleRateBox);
@@ -195,6 +201,19 @@ public sealed class MainForm : Form
 
         BuildEncoderTab(tabs);
         root.Controls.Add(tabs, 0, 1);
+    }
+
+    private void RefreshUsbDevices()
+    {
+        var old = usbBox.SelectedItem as string;
+        usbBox.Items.Clear();
+        try
+        {
+            usbBox.Items.AddRange(Ftd2xxUsb.GetSerialNumbers().Cast<object>().ToArray());
+        }
+        catch (Exception ex) { SetStatus($"枚举 USB 失败：{ex.Message}", true); }
+        if (usbBox.Items.Count > 0)
+            usbBox.SelectedItem = old is not null && usbBox.Items.Contains(old) ? old : usbBox.Items[0];
     }
 
     private void BuildEncoderTab(TabControl tabs)
@@ -319,12 +338,13 @@ public sealed class MainForm : Form
 
         if (IsUsb)
         {
+            if (usbBox.SelectedItem is not string serialNumber) { SetStatus("请先选择 USB 设备", true); return; }
             try
             {
                 usb = new Ftd2xxUsb();
-                usb.OpenBySerial(UsbSerialNumber);
+                usb.OpenBySerial(serialNumber);
                 SetConnected(true);
-                SetStatus($"已连接 USB FIFO · 序列号 {UsbSerialNumber}", false);
+                SetStatus($"已连接 USB FIFO · 序列号 {serialNumber}", false);
             }
             catch (Exception ex)
             {
@@ -1033,7 +1053,7 @@ public sealed class MainForm : Form
 
     private void SetConnected(bool connected)
     {
-        connectionBox.Enabled = portBox.Enabled = baudBox.Enabled = refreshButton.Enabled = !connected;
+        connectionBox.Enabled = portBox.Enabled = usbBox.Enabled = baudBox.Enabled = refreshButton.Enabled = usbRefreshButton.Enabled = !connected;
         connectButton.Text = connected ? "断开" : "连接";
         if (!connected) StopPolling();
         UpdateModeButtons();

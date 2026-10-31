@@ -1,11 +1,30 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Ad7606Host;
 
 internal sealed class Ftd2xxUsb : IDisposable
 {
     private const uint FT_OK = 0;
-    private const uint FT_OPEN_BY_SERIAL_NUMBER = 1;
+    private const uint FT_LIST_BY_SERIAL_NUMBER = 1;
+
+    [DllImport("ftd2xx64.dll",
+    EntryPoint = "FT_GetDeviceInfoDetail",
+    CallingConvention = CallingConvention.StdCall)]
+    private static extern uint FT_GetDeviceInfoDetail(
+    uint index,
+    out uint flags,
+    out uint type,
+    out uint id,
+    out uint locationId,
+    StringBuilder serialNumber,
+    StringBuilder description,
+    out IntPtr handle);
+
+    private const uint FT_LIST_BY_INDEX = 0x40000000;
+    private const uint FT_OPEN_BY_SERIAL_NUMBER = 0x00000001;
+
     private const byte FT_BITMODE_RESET = 0x00;
     private const byte FT_BITMODE_SYNC_FIFO = 0x40;
     private const uint FT_PURGE_RX = 1, FT_PURGE_TX = 2;
@@ -17,6 +36,16 @@ internal sealed class Ftd2xxUsb : IDisposable
 
     [DllImport("ftd2xx64.dll", EntryPoint = "FT_OpenEx", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.StdCall)]
     private static extern uint FT_OpenEx([MarshalAs(UnmanagedType.LPStr)] string arg, uint flags, out IntPtr handle);
+
+    [DllImport("ftd2xx64.dll", EntryPoint = "FT_CreateDeviceInfoList", CallingConvention = CallingConvention.StdCall)]
+    private static extern uint FT_CreateDeviceInfoList(out uint numberOfDevices);
+
+    [DllImport("ftd2xx64.dll", EntryPoint = "FT_ListDevices",
+    CharSet = CharSet.Ansi, CallingConvention = CallingConvention.StdCall)]
+    private static extern uint FT_ListDevices(
+    IntPtr arg1,
+    StringBuilder arg2,
+    uint flags);
 
     [DllImport("ftd2xx64.dll", CallingConvention = CallingConvention.StdCall)] private static extern uint FT_Close(IntPtr h);
     [DllImport("ftd2xx64.dll", CallingConvention = CallingConvention.StdCall)] private static extern uint FT_ResetDevice(IntPtr h);
@@ -34,6 +63,46 @@ internal sealed class Ftd2xxUsb : IDisposable
         Check(FT_Open(index, out handle), "打开 USB");
         try { Initialize(); }
         catch { Dispose(); throw; }
+    }
+
+    public static string[] GetSerialNumbers()
+    {
+        Check(
+            FT_CreateDeviceInfoList(out uint count),
+            "枚举 USB 设备"
+        );
+
+        var serialNumbers = new List<string>((int)count);
+
+        for (uint index = 0; index < count; index++)
+        {
+            var serial = new StringBuilder(256);
+            var description = new StringBuilder(256);
+
+            Check(
+                FT_GetDeviceInfoDetail(
+                    index,
+                    out uint flags,
+                    out uint type,
+                    out uint id,
+                    out uint locationId,
+                    serial,
+                    description,
+                    out IntPtr handle
+                ),
+                $"读取设备信息 Index={index}"
+            );
+
+            if (serial.Length > 0)
+            {
+                serialNumbers.Add(serial.ToString());
+                Debug.WriteLine(
+                    $"Index={index}, Serial={serial}, Description={description}"
+                );
+            }
+        }
+
+        return serialNumbers.ToArray();
     }
 
     public void OpenBySerial(string serialNumber)
