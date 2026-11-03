@@ -43,6 +43,12 @@ public sealed class MainForm : Form
     private readonly ComboBox windowBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 95 };
     private readonly ComboBox waveRangeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 95 };
     private readonly NumericUpDown waveCenterBox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 2, Increment = 0.1M, Value = 2.5M, Width = 72 };
+    private readonly NumericUpDown expectCenterBox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 2.5M, Width = 72 };
+    private readonly NumericUpDown expectCenterTolBox = new() { Minimum = 0, Maximum = 10, DecimalPlaces = 3, Increment = 0.01M, Value = 0.1M, Width = 62 };
+    private readonly NumericUpDown expectVppBox = new() { Minimum = 0, Maximum = 20, DecimalPlaces = 3, Increment = 0.1M, Value = 0.5M, Width = 72 };
+    private readonly NumericUpDown expectVppTolBox = new() { Minimum = 0, Maximum = 20, DecimalPlaces = 3, Increment = 0.01M, Value = 0.1M, Width = 62 };
+    private readonly CheckBox enableAlarmCheck = new() { Text = "启用超限报警", AutoSize = true, Checked = false };
+    private readonly Button resetWaveStatsButton = new() { Text = "重置统计", AutoSize = true };
     private readonly Button waveRunButton = new() { Text = "开始波形采集", AutoSize = true, Enabled = false };
     private readonly ComboBox scopeTriggerModeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 72 };
     private readonly ComboBox scopeTriggerSourceBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 72 };
@@ -86,15 +92,24 @@ public sealed class MainForm : Form
     private readonly NumericUpDown offsetCBox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 0, Width = 80 };
     private readonly NumericUpDown offsetDBox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 0, Width = 80 };
     private readonly Button encoderResetButton = new() { Text = "角度清零", AutoSize = true };
+    private readonly ComboBox encoderModeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 80 };
+    private readonly Button encoderCaptureOffsetsButton = new() { Text = "取当前均值", AutoSize = true };
     private readonly Label encoderAngleLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 30, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly DialPanel abzDial = new();
+    private readonly DialPanel cdDial = new();
+    private readonly DialPanel correctedDial = new();
     private readonly Label encoderSpeedLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 30, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
     private readonly Label encoderDirLabel = new() { AutoSize = false, Text = "未启用", Font = new Font("Microsoft YaHei UI", 30, FontStyle.Bold), ForeColor = Color.DimGray, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
     private readonly Label encoderCdPosLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
     private readonly Label encoderErrLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
     private readonly Label encoderMaxErrLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderMinErrLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderMeanErrLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderErrCountLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
     private readonly Label encoderTurnsLabel = new() { AutoSize = true, Text = "累计 — · Z 脉冲 —", ForeColor = Color.DimGray, Padding = new Padding(0, 4, 20, 0) };
     private readonly Label encoderABZLabel = new() { AutoSize = true, Text = "A=— B=— Z=—", ForeColor = Color.DimGray, Padding = new Padding(0, 4, 0, 0) };
     private readonly Label encoderDiagLabel = new() { AutoSize = true, Text = "", ForeColor = Color.DimGray, Font = new Font("Microsoft YaHei UI", 8.5f), Padding = new Padding(0, 4, 0, 0) };
+    private readonly Button encoderErrResetButton = new() { Text = "误差清零", AutoSize = true };
 
     // --- 数据 ---
     private SerialPort? serial;
@@ -107,6 +122,8 @@ public sealed class MainForm : Form
     private readonly object scopeLock = new();
     private readonly List<Sample> scopePreBuffer = new();
     private readonly List<Sample> scopeCaptureBuffer = new();
+    private Sample[] scopePaintBuffer = Array.Empty<Sample>();
+    private PointF[] wavePaintPoints = Array.Empty<PointF>();
     private bool scopeHold;
     private bool scopeArmed;
     private bool scopeCollectingPost;
@@ -131,14 +148,38 @@ public sealed class MainForm : Form
     private double currentRate;
     private double waveformSampleRate;
     private volatile FrameParser? activeParser;
+    private int streamUiUpdatePending;
+    private int streamWaveUpdatePending;
 
     private enum ReadMode { Stopped, All, Single, Waveform }
 
     private readonly struct Sample
     {
         public readonly long Index;
-        public readonly double[] Volts;
-        public Sample(long i, double[] v) { Index = i; Volts = v; }
+        private readonly ulong low;
+        private readonly ulong high;
+        private readonly double fullScale;
+        public Sample(long index, ReadOnlySpan<double> volts, double scale)
+        {
+            Index = index; fullScale = scale;
+            low = Pack(volts, 0, scale); high = Pack(volts, 4, scale);
+        }
+        private static ulong Pack(ReadOnlySpan<double> values, int start, double scale)
+        {
+            ulong packed = 0;
+            for (int i = 0; i < 4; i++)
+            {
+                short value = (short)Math.Clamp((int)Math.Round(values[start + i] * 32768.0 / scale), short.MinValue, short.MaxValue);
+                packed |= (ulong)(ushort)value << (i * 16);
+            }
+            return packed;
+        }
+        public double VoltageAt(int channel)
+        {
+            ulong packed = channel < 4 ? low : high;
+            short raw = unchecked((short)(packed >> ((channel & 3) * 16)));
+            return raw * fullScale / 32768.0;
+        }
     }
 
     private sealed record PollOptions(int StartChannel, int Count, int IntervalMs, double FullScale, bool IsUsb, double HistorySpanSeconds, int SampleRate);
@@ -224,6 +265,12 @@ public sealed class MainForm : Form
         errorFramesButton.Click += (_, _) => ShowErrorFrames();
         waveform.Paint += DrawWaveform;
 
+        resetWaveStatsButton.Click += (_, _) =>
+        {
+            signalStats.ResetCumulative();
+            UpdateWaveStats();
+        };
+
         spectrumTimer.Tick += (_, _) => { if (spectrumAutoCheck?.Checked == true) RefreshSpectrum(); };
         lissajousTimer.Tick += (_, _) => { if (lissajousAutoCheck?.Checked == true) RefreshLissajous(); };
 
@@ -299,12 +346,14 @@ public sealed class MainForm : Form
     private TabPage BuildWaveformTab()
     {
         var tab = new TabPage("波形显示") { BackColor = BackColor };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1, Padding = new Padding(10) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 5, ColumnCount = 1, Padding = new Padding(10) };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
+        // ---- 第 0 行：显示工具条（原有） ----
         var tools = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
         tools.Controls.Add(new Label { Text = "显示通道：", AutoSize = true, Padding = new Padding(0, 5, 4, 0) });
         foreach (var c in waveChecks) tools.Controls.Add(c);
@@ -331,35 +380,51 @@ public sealed class MainForm : Form
         tools.Controls.Add(clearBtn);
         layout.Controls.Add(tools, 0, 0);
 
+        // ---- 第 1 行：新增的阈值设置工具条 ----
+        var alarmTools = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 0, 0, 4) };
+        alarmTools.Controls.Add(new Label { Text = "期望中心电压：", AutoSize = true, Padding = new Padding(0, 5, 4, 0) });
+        alarmTools.Controls.Add(expectCenterBox);
+        alarmTools.Controls.Add(new Label { Text = "±", AutoSize = true, Padding = new Padding(2, 5, 2, 0) });
+        alarmTools.Controls.Add(expectCenterTolBox);
+        alarmTools.Controls.Add(new Label { Text = "V", AutoSize = true, Padding = new Padding(2, 5, 14, 0) });
+        alarmTools.Controls.Add(new Label { Text = "期望 Vpp：", AutoSize = true, Padding = new Padding(0, 5, 4, 0) });
+        alarmTools.Controls.Add(expectVppBox);
+        alarmTools.Controls.Add(new Label { Text = "±", AutoSize = true, Padding = new Padding(2, 5, 2, 0) });
+        alarmTools.Controls.Add(expectVppTolBox);
+        alarmTools.Controls.Add(new Label { Text = "Vpp", AutoSize = true, Padding = new Padding(2, 5, 14, 0) });
+        alarmTools.Controls.Add(enableAlarmCheck);
+        alarmTools.Controls.Add(resetWaveStatsButton);
+        layout.Controls.Add(alarmTools, 0, 1);
+
+        // ---- 第 2 行：波形画布 ----
         waveform.Dock = DockStyle.Fill; waveform.BackColor = Color.White; waveform.Margin = new Padding(0, 8, 0, 8);
-        layout.Controls.Add(waveform, 0, 1);
+        layout.Controls.Add(waveform, 0, 2);
 
+        // ---- 第 3 行：信息 ----
         waveInfo.Padding = new Padding(0, 4, 0, 0);
-        layout.Controls.Add(waveInfo, 0, 2);
+        layout.Controls.Add(waveInfo, 0, 3);
 
-        BuildWaveStatsPanel(layout, 3);
+        // ---- 第 4 行：统计表 ----
+        BuildWaveStatsPanel(layout, 4);
         tab.Controls.Add(layout);
         return tab;
     }
-
     private void BuildWaveStatsPanel(TableLayoutPanel parent, int row)
     {
         waveStatsTable = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
-            ColumnCount = 6,
+            ColumnCount = 9,
             RowCount = 9,
             Padding = new Padding(0, 6, 0, 0),
         };
-        waveStatsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 55));
-        waveStatsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
-        waveStatsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
-        waveStatsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
-        waveStatsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
-        waveStatsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        string[] headers = { "通道", "中心电压 DC", "峰峰值 Vpp", "AC 有效值", "主频", "" };
+        int[] widths = { 52, 92, 82, 82, 82, 172, 92, 172, 92 };
+        foreach (var w in widths)
+            waveStatsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, w));
+
+        string[] headers = { "通道", "DC", "Vpp", "AC RMS", "主频", "DC 范围", "DC 平均", "Vpp 范围", "Vpp 平均" };
         for (int c = 0; c < headers.Length; c++)
         {
             waveStatsTable.Controls.Add(new Label
@@ -374,7 +439,7 @@ public sealed class MainForm : Form
             }, c, 0);
         }
 
-        waveStatsLabels = new Label[8, 5];
+        waveStatsLabels = new Label[8, 9];
         for (int ch = 0; ch < 8; ch++)
         {
             waveStatsLabels[ch, 0] = new Label
@@ -386,7 +451,7 @@ public sealed class MainForm : Form
                 Font = new Font("Consolas", 9, FontStyle.Bold),
                 ForeColor = ChannelColors[ch]
             };
-            for (int c = 1; c < 5; c++)
+            for (int c = 1; c < 9; c++)
             {
                 waveStatsLabels[ch, c] = new Label
                 {
@@ -398,29 +463,53 @@ public sealed class MainForm : Form
                     ForeColor = Color.DimGray
                 };
             }
-            for (int c = 0; c < 5; c++) waveStatsTable.Controls.Add(waveStatsLabels[ch, c], c, ch + 1);
+            for (int c = 0; c < 9; c++) waveStatsTable.Controls.Add(waveStatsLabels[ch, c], c, ch + 1);
         }
         parent.Controls.Add(waveStatsTable, 0, row);
     }
-
     private TabPage BuildEncoderTab()
     {
         var page = new TabPage("编码器解算") { BackColor = BackColor };
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14), RowCount = 5, ColumnCount = 1 };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14), RowCount = 6, ColumnCount = 1 };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 270));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 360));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 210));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var row1 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
         row1.Controls.Add(encoderEnableCheck);
+        row1.Controls.Add(new Label { Text = "模式：", AutoSize = true, Padding = new Padding(8, 7, 2, 0) });
+        row1.Controls.Add(encoderModeBox);            // 单端 / 差分
         AddEncChannels(row1, "A+", "A-", 0, 1, Color.DodgerBlue);
         AddEncChannels(row1, "B+", "B-", 2, 3, Color.OrangeRed);
         AddEncChannels(row1, "Z+", "Z-", 4, 5, Color.SeaGreen);
         AddEncChannels(row1, "C+", "C-", 6, 7, Color.MediumPurple);
         AddEncChannels(row1, "D+", "D-", 8, 9, Color.DarkOrange);
         root.Controls.Add(row1, 0, 0);
+
+        // 在 encoderEnableCheck 等 UI 创建完之后
+        encoderModeBox.Items.AddRange(new object[] { "单端", "差分" });
+        encoderModeBox.SelectedIndex = 0;                  // 默认单端
+        encoderModeBox.SelectedIndexChanged += (_, _) => UpdateEncoderModeUi();
+
+        // offset 默认 2.5V（匹配单端 2.5V 中心）
+        offsetABox.Value = 2.5m;
+        offsetBBox.Value = 2.5m;
+        offsetZBox.Value = 2.5m;
+        offsetCBox.Value = 2.5m;
+        offsetDBox.Value = 2.5m;
+
+        // 运行时热更新 offset（不必停止采集）
+        offsetABox.ValueChanged += (_, _) => SyncEncoderOffsets();
+        offsetBBox.ValueChanged += (_, _) => SyncEncoderOffsets();
+        offsetZBox.ValueChanged += (_, _) => SyncEncoderOffsets();
+        offsetCBox.ValueChanged += (_, _) => SyncEncoderOffsets();
+        offsetDBox.ValueChanged += (_, _) => SyncEncoderOffsets();
+
+        encoderCaptureOffsetsButton.Click += (_, _) => CaptureEncoderOffsets();
+
 
         var row2 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 6, 0, 6) };
         row2.Controls.Add(new Label { Text = "每转线数：", AutoSize = true, Padding = new Padding(0, 6, 2, 0) });
@@ -433,18 +522,21 @@ public sealed class MainForm : Form
         row2.Controls.Add(encoderInvertZCheck);
         row2.Controls.Add(encoderAutoCenterCheck);
         row2.Controls.Add(encoderResetButton);
+        row2.Controls.Add(encoderCaptureOffsetsButton);
         root.Controls.Add(row2, 0, 1);
 
-        var big = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2 };
+        var big = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 3 };
         for (int c = 0; c < 3; c++) big.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
-        big.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        big.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        for (int r = 0; r < 3; r++) big.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 3));
         big.Controls.Add(MakeBigCard("ABZ 绝对角度", encoderAngleLabel, Color.DodgerBlue), 0, 0);
         big.Controls.Add(MakeBigCard("转速", encoderSpeedLabel, Color.OrangeRed), 1, 0);
         big.Controls.Add(MakeBigCard("旋转方向", encoderDirLabel, Color.SeaGreen), 2, 0);
         big.Controls.Add(MakeBigCard("CD 绝对位置", encoderCdPosLabel, Color.MediumPurple), 0, 1);
-        big.Controls.Add(MakeBigCard("ABZ − CD 误差", encoderErrLabel, Color.DarkOrange), 1, 1);
-        big.Controls.Add(MakeBigCard("最大误差", encoderMaxErrLabel, Color.DeepPink), 2, 1);
+        big.Controls.Add(MakeBigCard("当前误差", encoderErrLabel, Color.DarkOrange), 1, 1);
+        big.Controls.Add(MakeBigCard("误差样本数", encoderErrCountLabel, Color.Gray), 2, 1);
+        big.Controls.Add(MakeBigCard("最小误差", encoderMinErrLabel, Color.SteelBlue), 0, 2);
+        big.Controls.Add(MakeBigCard("最大误差", encoderMaxErrLabel, Color.DeepPink), 1, 2);
+        big.Controls.Add(MakeBigCard("平均误差 (MAE)", encoderMeanErrLabel, Color.Crimson), 2, 2);
         root.Controls.Add(big, 0, 2);
 
         var info = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
@@ -452,6 +544,13 @@ public sealed class MainForm : Form
         info.Controls.Add(encoderABZLabel);
         info.Controls.Add(encoderDiagLabel);
         root.Controls.Add(info, 0, 3);
+
+        var dials = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 8, 0, 0) };
+        for (int c = 0; c < 3; c++) dials.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
+        dials.Controls.Add(MakeDialCard("ABZ 当前角度", abzDial), 0, 0);
+        dials.Controls.Add(MakeDialCard("CD 当前角度", cdDial), 1, 0);
+        dials.Controls.Add(MakeDialCard("误差修正绝对角度", correctedDial), 2, 0);
+        root.Controls.Add(dials, 0, 4);
 
         var note = new Label
         {
@@ -466,9 +565,86 @@ public sealed class MainForm : Form
             Font = new Font(Font.FontFamily, 8.5f),
             Padding = new Padding(0, 10, 0, 0),
         };
-        root.Controls.Add(note, 0, 4);
+        root.Controls.Add(note, 0, 5);
         page.Controls.Add(root);
+
         return page;
+    }
+
+    private static Control MakeDialCard(string title, DialPanel dial)
+    {
+        var card = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Margin = new Padding(6), Padding = new Padding(6) };
+        var label = new Label { Text = title, Dock = DockStyle.Top, Height = 26, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.DimGray };
+        dial.Dock = DockStyle.Fill;
+        card.Controls.Add(dial); card.Controls.Add(label);
+        return card;
+    }
+
+    private sealed class DialPanel : Panel
+    {
+        private double angle;
+        private bool valid;
+        private string valueText = "—";
+        public DialPanel() { DoubleBuffered = true; ResizeRedraw = true; BackColor = Color.White; }
+        public void SetAngle(double value, bool isValid, string text)
+        {
+            if (Math.Abs(angle - value) < 0.01 && valid == isValid && valueText == text) return;
+            angle = value; valid = isValid; valueText = text; Invalidate();
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            float size = Math.Max(20, Math.Min(ClientSize.Width - 28, ClientSize.Height - 52));
+            float cx = ClientSize.Width / 2f, cy = 12 + size / 2f, r = size / 2f;
+            using var pen = new Pen(Color.FromArgb(220, 226, 234), 2);
+            g.DrawEllipse(pen, cx - r, cy - r, size, size);
+            using var tick = new Pen(Color.Silver, 1);
+            for (int i = 0; i < 12; i++) { double a = i * Math.PI / 6 - Math.PI / 2; g.DrawLine(tick, cx + (float)Math.Cos(a) * (r - 3), cy + (float)Math.Sin(a) * (r - 3), cx + (float)Math.Cos(a) * (r - 10), cy + (float)Math.Sin(a) * (r - 10)); }
+            if (valid) { double a = angle * Math.PI / 180 - Math.PI / 2; using var needle = new Pen(Color.DodgerBlue, 3); g.DrawLine(needle, cx, cy, cx + (float)Math.Cos(a) * (r - 14), cy + (float)Math.Sin(a) * (r - 14)); }
+            using var brush = new SolidBrush(valid ? Color.FromArgb(35, 55, 80) : Color.Gray);
+            using var font = new Font("Consolas", 12, FontStyle.Bold);
+            var measured = g.MeasureString(valueText, font); g.DrawString(valueText, font, brush, cx - measured.Width / 2, cy + r + 4);
+        }
+    }
+
+
+
+    /// <summary>单端模式下禁用“-”负极下拉框（视觉上告诉用户不用管）</summary>
+    private void UpdateEncoderModeUi()
+    {
+        bool single = encoderModeBox.SelectedIndex == 0;
+        for (int i = 1; i < 10; i += 2)              // A-, B-, Z-, C-, D- 索引
+            encoderBoxes[i].Enabled = !single;
+    }
+
+    /// <summary>UI offset 改动后同步给 EncoderState（热更新）</summary>
+    private void SyncEncoderOffsets()
+    {
+        encoder.SetOffsets(
+            (double)offsetABox.Value,
+            (double)offsetBBox.Value,
+            (double)offsetZBox.Value,
+            (double)offsetCBox.Value,
+            (double)offsetDBox.Value);
+    }
+
+    /// <summary>静置 0.5 秒后按一下，把 A/B/C/D 均值填入 offset 框。</summary>
+    private void CaptureEncoderOffsets()
+    {
+        var (a, b, c, d) = encoder.GetAverageVoltage();
+        if (a != 0 || b != 0)
+        {
+            offsetABox.Value = Math.Clamp((decimal)a, offsetABox.Minimum, offsetABox.Maximum);
+            offsetBBox.Value = Math.Clamp((decimal)b, offsetBBox.Minimum, offsetBBox.Maximum);
+        }
+        if (c != 0 || d != 0)
+        {
+            offsetCBox.Value = Math.Clamp((decimal)c, offsetCBox.Minimum, offsetCBox.Maximum);
+            offsetDBox.Value = Math.Clamp((decimal)d, offsetDBox.Minimum, offsetDBox.Maximum);
+        }
+        SyncEncoderOffsets();
+        SetStatus($"已取均值：A={a:F3}V B={b:F3}V C={c:F3}V D={d:F3}V", false);
     }
 
     private void AddEncChannels(FlowLayoutPanel row, string pLabel, string nLabel, int pi, int ni, Color c)
@@ -680,6 +856,7 @@ public sealed class MainForm : Form
         var cfg = new EncoderConfig
         {
             Enabled = encoderEnableCheck.Checked,
+            SingleEnded = encoderModeBox.SelectedIndex == 0,
             ChAp = GetEncChannel(0),
             ChAn = GetEncChannel(1),
             ChBp = GetEncChannel(2),
@@ -805,12 +982,12 @@ public sealed class MainForm : Form
             int totalPoints = ScopeWindowPoints();
             int prePoints = Math.Min(totalPoints - 1, (int)Math.Round(totalPoints * scopePositionSetting / 100.0));
             int postPoints = totalPoints - prePoints;
-            while (scopePreBuffer.Count > prePoints) scopePreBuffer.RemoveAt(0);
+            TrimScopeBuffer(scopePreBuffer, prePoints);
 
             if (scopeModeSetting == 0)
             {
                 scopeCaptureBuffer.Add(sample);
-                if (scopeCaptureBuffer.Count > totalPoints) scopeCaptureBuffer.RemoveAt(0);
+                TrimScopeBuffer(scopeCaptureBuffer, totalPoints);
                 scopePreviousSample = sample;
                 return;
             }
@@ -838,15 +1015,15 @@ public sealed class MainForm : Form
             bool crossed = false;
             if (scopePreviousSample.HasValue)
             {
-                double previous = scopePreviousSample.Value.Volts[scopeSourceSetting];
-                double current = sample.Volts[scopeSourceSetting];
+                double previous = scopePreviousSample.Value.VoltageAt(scopeSourceSetting);
+                double current = sample.VoltageAt(scopeSourceSetting);
                 crossed = scopeRisingSetting
                     ? previous < scopeLevelSetting && current >= scopeLevelSetting
                     : previous > scopeLevelSetting && current <= scopeLevelSetting;
             }
 
             scopePreBuffer.Add(sample);
-            while (scopePreBuffer.Count > prePoints + 1) scopePreBuffer.RemoveAt(0);
+            TrimScopeBuffer(scopePreBuffer, prePoints + 1);
 
             if (crossed)
             {
@@ -865,6 +1042,14 @@ public sealed class MainForm : Form
         }
     }
 
+    // List.RemoveAt(0) shifts every item. Trim a small batch instead, which keeps long captures responsive.
+    private static void TrimScopeBuffer(List<Sample> buffer, int maxCount)
+    {
+        const int slack = 1024;
+        if (buffer.Count <= maxCount + slack) return;
+        buffer.RemoveRange(0, Math.Min(slack, buffer.Count - maxCount));
+    }
+
     private double WindowSpanSeconds()
     {
         string s = (string)(windowBox.SelectedItem ?? "10 ms");
@@ -880,11 +1065,13 @@ public sealed class MainForm : Form
         public const int FrameSize = PayloadSize + 3;
         private const byte Header0 = 0xAB, Header1 = 0xCD;
         private const int MaxRecentErrors = 10;
+        private static readonly byte[] CrcTable = BuildCrcTable();
 
         private byte[] buf = new byte[64 * 1024];
         private int len;
         public long CrcErrors;
         public long DroppedBytes;
+        public long StreamOffset;
 
         public readonly struct ErrorFrame
         {
@@ -903,15 +1090,30 @@ public sealed class MainForm : Form
 
         public List<byte[]> Feed(byte[] data)
         {
-            if (len + data.Length > buf.Length)
+            var frames = new List<byte[]>();
+            Feed(data, data.Length, (source, offset) =>
             {
-                int newSize = Math.Max(buf.Length * 2, len + data.Length);
+                var payload = new byte[PayloadSize];
+                Buffer.BlockCopy(source, offset, payload, 0, PayloadSize);
+                frames.Add(payload);
+            });
+            return frames;
+        }
+
+        // Delivers valid payloads directly from the parser buffer. Streaming callers can process them
+        // immediately without allocating a List or one byte[] per frame.
+        public int Feed(byte[] data, int count, Action<byte[], int> onPayload)
+        {
+            if (count < 0 || count > data.Length) throw new ArgumentOutOfRangeException(nameof(count));
+            if (len + count > buf.Length)
+            {
+                int newSize = Math.Max(buf.Length * 2, len + count);
                 Array.Resize(ref buf, newSize);
             }
-            Buffer.BlockCopy(data, 0, buf, len, data.Length);
-            len += data.Length;
+            Buffer.BlockCopy(data, 0, buf, len, count);
+            len += count;
 
-            var frames = new List<byte[]>();
+            int frameCount = 0;
             int i = 0;
             while (i + FrameSize <= len)
             {
@@ -923,34 +1125,43 @@ public sealed class MainForm : Form
                     Buffer.BlockCopy(buf, i, raw, 0, FrameSize);
                     lock (recentErrors)
                     {
-                        recentErrors.Enqueue(new ErrorFrame(DateTime.Now, raw, crc, buf[i + FrameSize - 1], i));
+                        recentErrors.Enqueue(new ErrorFrame(DateTime.Now, raw, crc, buf[i + FrameSize - 1], StreamOffset + i));
                         while (recentErrors.Count > MaxRecentErrors) recentErrors.Dequeue();
                     }
                     i++; CrcErrors++; continue;
                 }
-                var payload = new byte[PayloadSize];
-                Buffer.BlockCopy(buf, i + 2, payload, 0, PayloadSize);
-                frames.Add(payload);
+                onPayload(buf, i + 2);
+                frameCount++;
                 i += FrameSize;
             }
             if (i > 0)
             {
                 Buffer.BlockCopy(buf, i, buf, 0, len - i);
                 len -= i;
+                StreamOffset += i;
             }
-            return frames;
+            return frameCount;
         }
 
         public static byte Crc8(byte[] data, int offset, int count)
         {
             byte crc = 0x00;
             for (int k = 0; k < count; k++)
-            {
-                crc ^= data[offset + k];
-                for (int b = 0; b < 8; b++)
-                    crc = (byte)(((crc & 0x80) != 0) ? ((crc << 1) ^ 0x07) : (crc << 1));
-            }
+                crc = CrcTable[crc ^ data[offset + k]];
             return crc;
+        }
+
+        private static byte[] BuildCrcTable()
+        {
+            var table = new byte[256];
+            for (int i = 0; i < table.Length; i++)
+            {
+                int crc = i;
+                for (int b = 0; b < 8; b++)
+                    crc = (crc & 0x80) != 0 ? ((crc << 1) ^ 0x07) : (crc << 1);
+                table[i] = (byte)crc;
+            }
+            return table;
         }
     }
 
@@ -972,52 +1183,56 @@ public sealed class MainForm : Form
         var parser = new FrameParser();
         activeParser = parser;
         var state = new StreamState();
-        const int MaxBlockBytes = 256 * 1024;
+        // A modest block bounds how long one parser pass can occupy the CPU on slower PCs.
+        const int MaxBlockBytes = 16 * 1024;
+        var readBuffer = new byte[MaxBlockBytes];
+        var lastVolts = new double[8];
         double fullScale = options.FullScale;
 
-        await Task.Run(() => { lock (ioLock) { dev.Purge(); dev.Write(UsbStartCmd); } }, token);
+        lock (ioLock) { dev.Purge(); dev.Write(UsbStartCmd); }
 
         try
         {
             while (!token.IsCancellationRequested)
             {
-                byte[] block = await Task.Run(() => { lock (ioLock) return dev.ReadAvailable(MaxBlockBytes); }, token);
-                if (block.Length == 0) continue;
+                int blockLength;
+                lock (ioLock) blockLength = dev.ReadAvailable(readBuffer, MaxBlockBytes);
+                if (blockLength == 0) continue;
 
-                state.BytesWindow += block.Length;
-                state.TotalBytes += block.Length;
+                state.BytesWindow += blockLength;
+                state.TotalBytes += blockLength;
 
-                List<byte[]> frames = parser.Feed(block);
-                if (frames.Count == 0) continue;
-
-                double[] lastVolts = new double[8];
                 long lastIndex = 0;
+                int frameCount;
 
                 lock (historyLock)
                 {
-                    for (int f = 0; f < frames.Count; f++)
+                    frameCount = parser.Feed(readBuffer, blockLength, (payload, offset) =>
                     {
-                        byte[] payload = frames[f];
-                        var volts = new double[8];
+                        Span<double> volts = stackalloc double[8];
                         for (int ch = 0; ch < 8; ch++)
                         {
-                            short v = unchecked((short)((payload[ch * 2] << 8) | payload[ch * 2 + 1]));
+                            short v = unchecked((short)((payload[offset + ch * 2] << 8) | payload[offset + ch * 2 + 1]));
                             volts[ch] = v * fullScale / 32768.0;
                         }
                         long idx = Interlocked.Increment(ref frameIndexCounter);
-                        var sample = new Sample(idx, volts);
+                        var sample = new Sample(idx, volts, fullScale);
                         history.Add(sample);
                         ProcessScopeSample(sample);
                         encoder.ProcessFrame(volts);
                         signalStats.Push(volts);
-                        if (f == frames.Count - 1) { lastVolts = volts; lastIndex = idx; }
+                        volts.CopyTo(lastVolts); lastIndex = idx;
+                    });
+                    if (frameCount > 0)
+                    {
+                        int actualRate = Math.Max(1, (int)Math.Round(waveformSampleRate > 0 ? waveformSampleRate : options.SampleRate));
+                        TrimHistory(lastIndex, options.HistorySpanSeconds, actualRate);
                     }
-                    int actualRate = Math.Max(1, (int)Math.Round(waveformSampleRate > 0 ? waveformSampleRate : options.SampleRate));
-                    TrimHistory(lastIndex, options.HistorySpanSeconds, actualRate);
                 }
+                if (frameCount == 0) continue;
 
-                state.FramesWindow += frames.Count;
-                state.TotalFrames += frames.Count;
+                state.FramesWindow += frameCount;
+                state.TotalFrames += frameCount;
 
                 var now = DateTime.Now;
                 if ((now - state.LastUiUpdate).TotalMilliseconds >= 50)
@@ -1044,35 +1259,42 @@ public sealed class MainForm : Form
                     long droppedBytes = parser.DroppedBytes;
                     long totalFrames = state.TotalFrames;
                     long totalBytes = state.TotalBytes;
-                    var lastSnapshot = new double[8];
-                    Array.Copy(lastVolts, lastSnapshot, 8);
+                    var lastSnapshot = lastVolts;
 
-                    SafeInvoke(() =>
+                    if (Interlocked.Exchange(ref streamUiUpdatePending, 1) == 0) SafeInvoke(() =>
                     {
-                        ApplyChannelsToUi(0, 8, lastSnapshot, fullScale);
-                        lastReadLabel.Text = $"流模式 · 累计 {totalFrames:N0} 帧 / {totalBytes / 1024.0 / 1024.0:F2} MB";
-                        if (rateHz > 0)
+                        try
                         {
-                            double expectedFrameRate = mbPerSec * 1024.0 * 1024.0 / FrameParser.FrameSize;
-                            rateLabel.Text = $"实际帧率：{rateHz:F1} Hz";
-                            usbRateLabel.Text = $"USB：{mbPerSec:F2} MiB/s · 有效帧率：{rateHz:F0} Hz · 理论字节帧率：{expectedFrameRate:F0} Hz · CRC错 {crcErrors} · 丢弃 {droppedBytes}";
+                            ApplyChannelsToUi(0, 8, lastSnapshot, fullScale);
+                            lastReadLabel.Text = $"流模式 · 累计 {totalFrames:N0} 帧 / {totalBytes / 1024.0 / 1024.0:F2} MB";
+                            if (rateHz > 0)
+                            {
+                                double expectedFrameRate = mbPerSec * 1024.0 * 1024.0 / FrameParser.FrameSize;
+                                rateLabel.Text = $"实际帧率：{rateHz:F1} Hz";
+                                usbRateLabel.Text = $"USB：{mbPerSec:F2} MiB/s · 有效帧率：{rateHz:F0} Hz · 理论字节帧率：{expectedFrameRate:F0} Hz · CRC错 {crcErrors} · 丢弃 {droppedBytes}";
+                            }
+                            if (mode == ReadMode.Waveform)
+                            {
+                                int cached;
+                                lock (historyLock) cached = history.Count;
+                                waveInfo.Text = $"流采集中 · 缓存 {cached:N0} 点 · 实际 {rateHz:F0} Hz · {mbPerSec:F2} MB/s";
+                            }
+                            UpdateWaveStats();
+                            UpdateEncoderUi();
+                            errorFramesButton.Enabled = true;
                         }
-                        if (mode == ReadMode.Waveform)
-                        {
-                            int cached;
-                            lock (historyLock) cached = history.Count;
-                            waveInfo.Text = $"流采集中 · 缓存 {cached:N0} 点 · 实际 {rateHz:F0} Hz · {mbPerSec:F2} MB/s";
-                        }
-                        UpdateWaveStats();
-                        UpdateEncoderUi();
-                        errorFramesButton.Enabled = true;
+                        finally { Volatile.Write(ref streamUiUpdatePending, 0); }
                     });
                 }
 
                 if ((now - state.LastWaveUpdate).TotalMilliseconds >= 40)
                 {
                     state.LastWaveUpdate = now;
-                    SafeInvoke(() => waveform.Invalidate());
+                    if (Interlocked.Exchange(ref streamWaveUpdatePending, 1) == 0) SafeInvoke(() =>
+                    {
+                        try { waveform.Invalidate(); }
+                        finally { Volatile.Write(ref streamWaveUpdatePending, 0); }
+                    });
                 }
             }
         }
@@ -1084,8 +1306,8 @@ public sealed class MainForm : Form
         finally
         {
             if (ReferenceEquals(activeParser, parser)) activeParser = null;
-            try { await Task.Run(() => { lock (ioLock) dev.Write(UsbStopCmd); }); } catch { }
-            try { await Task.Run(() => { lock (ioLock) dev.Purge(); }); } catch { }
+            try { lock (ioLock) dev.Write(UsbStopCmd); } catch { }
+            try { lock (ioLock) dev.Purge(); } catch { }
         }
     }
 
@@ -1106,26 +1328,60 @@ public sealed class MainForm : Form
     private void UpdateWaveStats()
     {
         if (waveStatsLabels is null) return;
+
+        bool alarm = enableAlarmCheck.Checked;
+        double expectCenter = (double)expectCenterBox.Value;
+        double centerTol = (double)expectCenterTolBox.Value;
+        double expectVpp = (double)expectVppBox.Value;
+        double vppTol = (double)expectVppTolBox.Value;
+
         for (int ch = 0; ch < 8; ch++)
         {
             var s = signalStats.GetStats(ch);
+            var c = signalStats.GetCumulativeStats(ch);
+
             if (!s.Valid)
             {
-                for (int c = 1; c < 5; c++) waveStatsLabels[ch, c].Text = "—";
+                for (int k = 1; k < 9; k++) waveStatsLabels[ch, k].Text = "—";
+                for (int k = 1; k < 9; k++) waveStatsLabels[ch, k].ForeColor = Color.DimGray;
                 continue;
             }
+
+            // 实时值
             waveStatsLabels[ch, 1].Text = $"{s.Dc:+0.0000;-0.0000;0.0000} V";
             waveStatsLabels[ch, 2].Text = $"{s.Vpp:F4} V";
             waveStatsLabels[ch, 3].Text = $"{s.AcRms:F4} V";
             waveStatsLabels[ch, 4].Text = s.Frequency > 0.5 ? $"{s.Frequency:F1} Hz" : "—";
+
+            // 超限报警着色
+            bool dcBad = alarm && Math.Abs(s.Dc - expectCenter) > centerTol;
+            bool vppBad = alarm && Math.Abs(s.Vpp - expectVpp) > vppTol;
+            waveStatsLabels[ch, 1].ForeColor = dcBad ? Color.Firebrick : Color.DimGray;
+            waveStatsLabels[ch, 2].ForeColor = vppBad ? Color.Firebrick : Color.DimGray;
+            waveStatsLabels[ch, 3].ForeColor = Color.DimGray;
+            waveStatsLabels[ch, 4].ForeColor = Color.DimGray;
+
+            // 累计值
+            if (c.Valid)
+            {
+                waveStatsLabels[ch, 5].Text = $"{c.MinDc:+0.0000;-0.0000;0.0000} ~ {c.MaxDc:+0.0000;-0.0000;0.0000}";
+                waveStatsLabels[ch, 6].Text = $"{c.AvgDc:+0.0000;-0.0000;0.0000}";
+                waveStatsLabels[ch, 7].Text = $"{c.MinVpp:F4} ~ {c.MaxVpp:F4}";
+                waveStatsLabels[ch, 8].Text = $"{c.AvgVpp:F4}";
+            }
+            else
+            {
+                for (int k = 5; k < 9; k++) waveStatsLabels[ch, k].Text = "—";
+            }
+            for (int k = 5; k < 9; k++) waveStatsLabels[ch, k].ForeColor = Color.DimGray;
         }
     }
-
     private void UpdateEncoderUi()
     {
         var snap = encoder.GetSnapshot();
         if (!snap.Valid)
         {
+            abzDial.SetAngle(0, false, "等待采集"); cdDial.SetAngle(0, false, "未配置"); correctedDial.SetAngle(0, false, "等待采集");
             encoderAngleLabel.Text = "—";
             encoderSpeedLabel.Text = "—";
             encoderDirLabel.Text = "未启用";
@@ -1141,32 +1397,65 @@ public sealed class MainForm : Form
 
         if (!snap.Synced) encoderAngleLabel.Text = "—(等待Z)";
         else encoderAngleLabel.Text = $"{snap.AngleDeg:F2}°";
+        abzDial.SetAngle(snap.AbzAngleDeg, snap.Synced, snap.Synced ? $"{snap.AbzAngleDeg:F2}°" : "等待 Z");
+        cdDial.SetAngle(snap.CdAngleDeg, snap.CdValid, snap.CdValid ? $"{snap.CdAngleDeg:F2}°" : "未配置");
+        double corrected = (snap.AbzAngleDeg - snap.AngleErrorDeg + 360) % 360;
+        correctedDial.SetAngle(corrected, snap.CdValid && snap.Synced, snap.CdValid && snap.Synced ? $"{corrected:F2}°" : "等待同步");
         encoderSpeedLabel.Text = $"{snap.SpeedRpm:F2} rpm";
 
         if (snap.Direction > 0) { encoderDirLabel.Text = "CW ↻"; encoderDirLabel.ForeColor = Color.SeaGreen; }
         else if (snap.Direction < 0) { encoderDirLabel.Text = "CCW ↺"; encoderDirLabel.ForeColor = Color.OrangeRed; }
         else { encoderDirLabel.Text = "静止"; encoderDirLabel.ForeColor = Color.DimGray; }
 
+        bool hasErr = snap.CdValid && snap.Synced && snap.AngleErrorSamples > 0;
         if (snap.CdValid)
         {
             encoderCdPosLabel.Text = $"{snap.CdAngleDeg:F2}°";
-            encoderErrLabel.Text = snap.Synced ? $"{snap.AngleErrorDeg:+0.00;-0.00;0.00}°" : "—(等待Z)";
-            encoderErrLabel.ForeColor = Math.Abs(snap.AngleErrorDeg) > 10 ? Color.Firebrick : Color.FromArgb(35, 55, 80);
-            encoderMaxErrLabel.Text = snap.Synced ? $"{snap.MaxAngleErrorDeg:F2}°" : "—";
+            encoderCdPosLabel.ForeColor = Color.FromArgb(35, 55, 80);
+
+            if (snap.Synced)
+            {
+                encoderErrLabel.Text = $"{snap.AngleErrorDeg:+0.00;-0.00;0.00}°";
+                encoderErrLabel.ForeColor = Math.Abs(snap.AngleErrorDeg) > 10 ? Color.Firebrick : Color.FromArgb(35, 55, 80);
+            }
+            else
+            {
+                encoderErrLabel.Text = "—(等待Z)";
+                encoderErrLabel.ForeColor = Color.DimGray;
+            }
+
+            encoderErrCountLabel.Text = snap.AngleErrorSamples.ToString("N0");
+            encoderErrCountLabel.ForeColor = Color.FromArgb(35, 55, 80);
+
+            encoderMinErrLabel.Text = hasErr ? $"{snap.MinAngleErrorDeg:+0.00;-0.00;0.00}°" : "—";
+            encoderMinErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+
+            encoderMaxErrLabel.Text = hasErr ? $"{snap.MaxAngleErrorDeg:+0.00;-0.00;0.00}°" : "—";
+            encoderMaxErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+
+            encoderMeanErrLabel.Text = hasErr ? $"{snap.MeanAbsAngleErrorDeg:F2}°" : "—";
+            encoderMeanErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
         }
         else
         {
             encoderCdPosLabel.Text = "未配置";
             encoderErrLabel.Text = "未配置";
+            encoderErrCountLabel.Text = "未配置";
+            encoderMinErrLabel.Text = "未配置";
             encoderMaxErrLabel.Text = "未配置";
+            encoderMeanErrLabel.Text = "未配置";
             encoderCdPosLabel.ForeColor = Color.DimGray;
             encoderErrLabel.ForeColor = Color.DimGray;
+            encoderErrCountLabel.ForeColor = Color.DimGray;
+            encoderMinErrLabel.ForeColor = Color.DimGray;
             encoderMaxErrLabel.ForeColor = Color.DimGray;
+            encoderMeanErrLabel.ForeColor = Color.DimGray;
         }
 
         encoderTurnsLabel.Text = $"累计 {snap.ContinuousTurns:F3} 圈 · Z 脉冲 {snap.ZPulseCount}";
         encoderABZLabel.Text = $"A={snap.A:+0.000;-0.000;0.000}V B={snap.B:+0.000;-0.000;0.000}V Z={snap.Z:+0.000;-0.000;0.000}V";
         encoderDiagLabel.Text = $"原始 A={snap.RawA:+0.000;-0.000;0.000}V B={snap.RawB:+0.000;-0.000;0.000}V Z={snap.RawZ:+0.000;-0.000;0.000}V · 峰值 A={snap.PeakA:F3}V B={snap.PeakB:F3}V · dt={snap.DtPerFrameMs:F4}ms · {(snap.Synced ? "已同步" : "未同步")}";
+        encoderDiagLabel.Text += $" · 模式：{(snap.SingleEnded ? "单端" : "差分")}";
     }
 
     // ============================ UART 轮询 ============================
@@ -1230,7 +1519,7 @@ public sealed class MainForm : Form
             long idx = Interlocked.Increment(ref frameIndexCounter);
             lock (historyLock)
             {
-                var sample = new Sample(idx, voltsArr);
+                var sample = new Sample(idx, voltsArr, options.FullScale);
                 history.Add(sample);
                 ProcessScopeSample(sample);
                 encoder.ProcessFrame(voltsArr);
@@ -1371,7 +1660,7 @@ public sealed class MainForm : Form
             int sampleRate = Math.Max(1, (int)Math.Round(IsUsb && waveformSampleRate > 0 ? waveformSampleRate : (double)sampleRateBox.Value));
             lock (historyLock)
             {
-                var sample = new Sample(idx, voltsByChannel);
+                var sample = new Sample(idx, voltsByChannel, fullScale);
                 history.Add(sample);
                 if (fullFrame) ProcessScopeSample(sample);
                 TrimHistory(idx, WindowSpanSeconds(), sampleRate);
@@ -1456,40 +1745,53 @@ public sealed class MainForm : Form
         }
         g.DrawRectangle(axisPen, plot);
 
-        bool[] checkedCh = new bool[8];
-        for (int i = 0; i < 8; i++) checkedCh[i] = waveChecks[i].Checked;
-
         Sample[] points;
+        int pointCount;
+        int sourcePointCount;
         long triggerIndex;
         lock (scopeLock)
         {
-            points = scopeCaptureBuffer.ToArray();
+            sourcePointCount = scopeCaptureBuffer.Count;
+            pointCount = Math.Min(sourcePointCount, 8192);
+            if (scopePaintBuffer.Length < pointCount)
+                scopePaintBuffer = new Sample[Math.Max(pointCount, scopePaintBuffer.Length * 2 + 1024)];
+            if (pointCount == sourcePointCount)
+                scopeCaptureBuffer.CopyTo(scopePaintBuffer, 0);
+            else
+                for (int i = 0; i < pointCount; i++)
+                    scopePaintBuffer[i] = scopeCaptureBuffer[(int)((long)i * (sourcePointCount - 1) / (pointCount - 1))];
+            points = scopePaintBuffer;
             triggerIndex = scopeTriggerIndex;
         }
 
-        long startIndex = points.Length == 0 ? 0 : points[0].Index;
+        long startIndex = pointCount == 0 ? 0 : points[0].Index;
         int width = plot.Width;
-        bool tooSparse = points.Length > 0 && points.Length < 10;
 
-        foreach (int ch in Enumerable.Range(0, 8).Where(i => checkedCh[i]))
+        for (int ch = 0; ch < 8; ch++)
         {
-            if (points.Length == 0) continue;
+            if (!waveChecks[ch].Checked) continue;
+            if (pointCount == 0) continue;
 
-            if (points.Length <= width)
+            if (pointCount <= width)
             {
                 using var pen = new Pen(ChannelColors[ch], 1.6f);
-                var pts = new List<PointF>(points.Length);
-                foreach (var s in points)
+                if (wavePaintPoints.Length < pointCount)
+                    wavePaintPoints = new PointF[Math.Max(pointCount, wavePaintPoints.Length * 2 + 256)];
+                var pts = wavePaintPoints;
+                int drawn = 0;
+                for (int p = 0; p < pointCount; p++)
                 {
+                    var s = points[p];
                     if (s.Index < startIndex) continue;
                     float x = plot.Left + (float)((s.Index - startIndex) / (double)windowPoints * width);
-                    float y = plot.Top + (float)((centerVoltage + halfRange - s.Volts[ch]) / (2 * halfRange) * plot.Height);
+                    float y = plot.Top + (float)((centerVoltage + halfRange - s.VoltageAt(ch)) / (2 * halfRange) * plot.Height);
                     if (y < plot.Top) y = plot.Top;
                     if (y > plot.Bottom) y = plot.Bottom;
-                    pts.Add(new PointF(x, y));
+                    pts[drawn++] = new PointF(x, y);
                 }
-                if (pts.Count >= 2) g.DrawLines(pen, pts.ToArray());
-                else if (pts.Count == 1)
+                if (drawn >= 2)
+                    for (int p = 1; p < drawn; p++) g.DrawLine(pen, pts[p - 1], pts[p]);
+                else if (drawn == 1)
                 {
                     using var brush = new SolidBrush(ChannelColors[ch]);
                     g.FillEllipse(brush, pts[0].X - 2.5f, pts[0].Y - 2.5f, 5, 5);
@@ -1501,13 +1803,14 @@ public sealed class MainForm : Form
                 int prevX = int.MinValue;
                 float colMin = 0, colMax = 0;
                 bool hasPrev = false;
-                foreach (var s in points)
+                for (int p = 0; p < pointCount; p++)
                 {
+                    var s = points[p];
                     if (s.Index < startIndex) continue;
                     int x = plot.Left + (int)((s.Index - startIndex) / (double)windowPoints * width);
                     if (x < plot.Left) x = plot.Left;
                     if (x > plot.Right) x = plot.Right;
-                    float y = plot.Top + (float)((centerVoltage + halfRange - s.Volts[ch]) / (2 * halfRange) * plot.Height);
+                    float y = plot.Top + (float)((centerVoltage + halfRange - s.VoltageAt(ch)) / (2 * halfRange) * plot.Height);
                     if (y < plot.Top) y = plot.Top;
                     if (y > plot.Bottom) y = plot.Bottom;
                     if (!hasPrev) { prevX = x; colMin = colMax = y; hasPrev = true; continue; }
@@ -1518,22 +1821,22 @@ public sealed class MainForm : Form
             }
         }
 
-        string hint = $"时间窗 {FormatSpan(spanSeconds)} · 采样率 {sampleRate:F0} Hz · 理论 {windowPoints:N0} 点 · 实际 {points.Length:N0} 点";
+        string hint = $"时间窗 {FormatSpan(spanSeconds)} · 采样率 {sampleRate:F0} Hz · 理论 {windowPoints:N0} 点 · 实际 {sourcePointCount:N0} 点";
         g.DrawString(hint, font, labelBrush, plot.Left, plot.Top + 2);
 
-        if (points.Length > 1 && triggerIndex >= 0)
+        if (pointCount > 1 && triggerIndex >= 0)
         {
             int triggerOffset = 0;
-            while (triggerOffset < points.Length && points[triggerOffset].Index < triggerIndex) triggerOffset++;
-            float tx = plot.Left + triggerOffset / (float)Math.Max(1, points.Length - 1) * width;
+            while (triggerOffset < pointCount && points[triggerOffset].Index < triggerIndex) triggerOffset++;
+            float tx = plot.Left + triggerOffset / (float)Math.Max(1, pointCount - 1) * width;
             using var triggerPen = new Pen(Color.Firebrick, 1f) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
             g.DrawLine(triggerPen, tx, plot.Top, tx, plot.Bottom);
             g.DrawString("触发", font, Brushes.Firebrick, tx + 3, plot.Top + 18);
         }
 
-        if (points.Length == 0)
+        if (pointCount == 0)
             g.DrawString("开始波形采集后将在此显示所选通道", new Font(Font, FontStyle.Bold), Brushes.Gray, plot.Left + 25, plot.Top + plot.Height / 2);
-        else if (tooSparse)
+        else if (pointCount < 10)
             g.DrawString("窗口内点数不足 10 个，请把时间窗调大；若采样率确实不够，请先解决 FPGA 帧率", new Font(Font, FontStyle.Bold), Brushes.Firebrick, plot.Left + 25, plot.Top + plot.Height / 2);
     }
 
@@ -1703,4 +2006,3 @@ internal sealed class ErrorFramesForm : Form
             $"头仍是 AB CD，载荷像错位 → 丢字节；头仍是 AB CD，个别位翻转 → 噪声；偏移接近 19 的倍数 → 同一帧反复失败。";
     }
 }
-

@@ -149,6 +149,16 @@ internal sealed class Ftd2xxUsb : IDisposable
         return result;
     }
 
+    // Reads directly into a caller-owned buffer to avoid allocating a new array for every USB transfer.
+    public int ReadAvailable(byte[] destination, int maxBytes)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        int requested = Math.Min(maxBytes, destination.Length);
+        if (requested <= 0) return 0;
+        Check(FT_Read(handle, destination, (uint)requested, out uint got), "读取 USB 数据");
+        return checked((int)got);
+    }
+
     public byte[] ReadExact(int length, TimeSpan timeout)
     {
         byte[] result = new byte[length];

@@ -3,12 +3,13 @@
 internal sealed class EncoderConfig
 {
     public bool Enabled;
+    public bool SingleEnded;
     public int ChAp = -1, ChAn = -1, ChBp = -1, ChBn = -1, ChZp = -1, ChZn = -1;
-    public int ChCp = -1, ChCn = -1, ChDp = -1, ChDn = -1;      // 新增：C/D 差分
+    public int ChCp = -1, ChCn = -1, ChDp = -1, ChDn = -1;
     public double Lines = 1250;
     public bool InvertZ;
-    public double OffsetA, OffsetB, OffsetZ;
-    public double OffsetC, OffsetD;                              // 新增
+    public double OffsetA = 2.5, OffsetB = 2.5, OffsetZ = 2.5;
+    public double OffsetC = 2.5, OffsetD = 2.5;
     public bool AutoCenter;
 }
 
@@ -16,6 +17,7 @@ internal sealed class EncoderSnapshot
 {
     public bool Valid;
     public bool Synced;
+    public bool SingleEnded;
     public double AngleDeg;
     public double ContinuousTurns;
     public double SpeedRpm;
@@ -26,22 +28,30 @@ internal sealed class EncoderSnapshot
     public int ZPulseCount;
     public double DtPerFrameMs;
 
-    // CD 绝对位置轨道
     public bool CdValid;
-    public double CdAngleDeg;         // CD 单圈绝对位置 [0,360)
-    public double AbzAngleDeg;        // ABZ 单圈位置 [0,360)
-    public double AngleErrorDeg;      // ABZ - CD，归一化到 [-180,180]
-    public double MaxAngleErrorDeg;   // 上电以来最大绝对误差
+    public double CdAngleDeg;
+    public double AbzAngleDeg;
+    public double AngleErrorDeg;
+
+    // 误差统计（最小/最大/平均绝对/样本数）
+    public double MinAngleErrorDeg;
+    public double MaxAngleErrorDeg;
+    public double MeanAbsAngleErrorDeg;
+    public long AngleErrorSamples;
+
+    // 供 UI “取当前均值” 使用
+    public double MeanA, MeanB, MeanC, MeanD;
 }
 
 internal sealed class EncoderState
 {
     private readonly object _lock = new();
 
-    private bool _enabled, _autoCenter, _invertZ;
+    private bool _enabled, _autoCenter, _invertZ, _singleEnded;
     private int _chAp, _chAn, _chBp, _chBn, _chZp, _chZn;
     private int _chCp = -1, _chCn = -1, _chDp = -1, _chDn = -1;
-    private double _lines = 1250, _offsetA, _offsetB, _offsetZ, _offsetC, _offsetD;
+    private double _lines = 1250;
+    private double _offsetA = 2.5, _offsetB = 2.5, _offsetZ = 2.5, _offsetC = 2.5, _offsetD = 2.5;
     private double _dtPerFrame = 5e-6;
 
     private double _offsetEstA, _offsetEstB;
@@ -53,7 +63,16 @@ internal sealed class EncoderState
     private double _peakA, _peakB;
 
     private bool _cdValid;
-    private double _cdAngleDeg, _maxErrDeg;
+    private double _cdAngleDeg;
+
+    // 误差统计
+    private double _minErrDeg = double.PositiveInfinity;
+    private double _maxErrDeg = double.NegativeInfinity;
+    private double _sumAbsErrDeg;
+    private long _errCount;
+
+    private double _meanA, _meanB, _meanC, _meanD;
+    private bool _meanInit;
 
     private EncoderSnapshot _snapshot = new();
 
@@ -62,6 +81,7 @@ internal sealed class EncoderState
         lock (_lock)
         {
             _enabled = cfg.Enabled && cfg.ChAp >= 0 && cfg.ChBp >= 0;
+            _singleEnded = cfg.SingleEnded;
             _chAp = cfg.ChAp; _chAn = cfg.ChAn; _chBp = cfg.ChBp; _chBn = cfg.ChBn;
             _chZp = cfg.ChZp; _chZn = cfg.ChZn;
             _chCp = cfg.ChCp; _chCn = cfg.ChCn; _chDp = cfg.ChDp; _chDn = cfg.ChDn;
@@ -75,11 +95,37 @@ internal sealed class EncoderState
         }
     }
 
+    public void ResetErrorStats()
+    {
+        lock (_lock)
+        {
+            _minErrDeg = double.PositiveInfinity;
+            _maxErrDeg = double.NegativeInfinity;
+            _sumAbsErrDeg = 0;
+            _errCount = 0;
+        }
+    }
+
+    public void SetOffsets(double a, double b, double z, double c, double d)
+    {
+        lock (_lock) { _offsetA = a; _offsetB = b; _offsetZ = z; _offsetC = c; _offsetD = d; }
+    }
+
     public void UpdateFrameInterval(double dtPerFrame)
     {
         if (dtPerFrame <= 0 || double.IsNaN(dtPerFrame) || double.IsInfinity(dtPerFrame)) return;
         if (dtPerFrame < 5e-7 || dtPerFrame > 0.1) return;
         lock (_lock) { _dtPerFrame = dtPerFrame; }
+    }
+
+    public (double A, double B, double C, double D) GetAverageVoltage()
+    {
+        lock (_lock) { return (_meanA, _meanB, _meanC, _meanD); }
+    }
+
+    public void ResetMeans()
+    {
+        lock (_lock) { _meanA = _meanB = _meanC = _meanD = 0; _meanInit = false; }
     }
 
     public void ZeroAngle()
@@ -90,6 +136,10 @@ internal sealed class EncoderState
             _lastSpeedAngle = 0;
             _lastSpeedTime = _timeAccum;
             _synced = false;
+            _minErrDeg = double.PositiveInfinity;
+            _maxErrDeg = double.NegativeInfinity;
+            _sumAbsErrDeg = 0;
+            _errCount = 0;
         }
     }
 
@@ -103,19 +153,43 @@ internal sealed class EncoderState
         _lastZEffective = 0;
         _speedRps = 0; _lastSpeedAngle = 0; _lastSpeedTime = 0; _timeAccum = 0;
         _zPulses = 0; _peakA = _peakB = 0;
-        _cdAngleDeg = 0; _maxErrDeg = 0;
+        _cdAngleDeg = 0;
+        _minErrDeg = double.PositiveInfinity;
+        _maxErrDeg = double.NegativeInfinity;
+        _sumAbsErrDeg = 0;
+        _errCount = 0;
+        _meanA = _meanB = _meanC = _meanD = 0; _meanInit = false;
         _snapshot = new EncoderSnapshot();
     }
 
-    public void ProcessFrame(double[] volts)
+    public void ProcessFrame(ReadOnlySpan<double> volts)
     {
         if (!_enabled) return;
 
         lock (_lock)
         {
-            double rawA = Diff(volts, _chAp, _chAn);
-            double rawB = Diff(volts, _chBp, _chBn);
-            double rawZ = Diff(volts, _chZp, _chZn);
+            double rawA = ReadRaw(volts, _chAp, _chAn);
+            double rawB = ReadRaw(volts, _chBp, _chBn);
+            double rawZ = ReadRaw(volts, _chZp, _chZn);
+            double rawC = _cdValid ? ReadRaw(volts, _chCp, _chCn) : 0;
+            double rawD = _cdValid ? ReadRaw(volts, _chDp, _chDn) : 0;
+
+            const double meanAlpha = 0.00002;
+            if (!_meanInit)
+            {
+                _meanA = rawA; _meanB = rawB; _meanC = rawC; _meanD = rawD;
+                _meanInit = true;
+            }
+            else
+            {
+                _meanA += meanAlpha * (rawA - _meanA);
+                _meanB += meanAlpha * (rawB - _meanB);
+                if (_cdValid)
+                {
+                    _meanC += meanAlpha * (rawC - _meanC);
+                    _meanD += meanAlpha * (rawD - _meanD);
+                }
+            }
 
             double a = rawA - _offsetA;
             double b = rawB - _offsetB;
@@ -135,11 +209,24 @@ internal sealed class EncoderState
 
             _timeAccum += _dtPerFrame;
 
+            if (_cdValid)
+            {
+                double c = rawC - _offsetC;
+                double d = rawD - _offsetD;
+                const double minCdAmp = 0.005;
+                if (Math.Abs(c) > minCdAmp || Math.Abs(d) > minCdAmp)
+                {
+                    double cd = Math.Atan2(d, c) * 180.0 / Math.PI;
+                    if (cd < 0) cd += 360;
+                    _cdAngleDeg = cd;
+                }
+            }
+
             const double minAmp = 0.01;
             if (Math.Abs(a) < minAmp && Math.Abs(b) < minAmp)
             {
                 _speedRps *= 0.95;
-                EmitSnapshot(a, b, z, rawA, rawB, rawZ, volts);
+                EmitSnapshot(a, b, z, rawA, rawB, rawZ, rawC, rawD);
                 return;
             }
 
@@ -151,7 +238,7 @@ internal sealed class EncoderState
                 _lastSpeedTime = _timeAccum;
                 _lastSpeedAngle = 0;
                 _init = true;
-                EmitSnapshot(a, b, z, rawA, rawB, rawZ, volts);
+                EmitSnapshot(a, b, z, rawA, rawB, rawZ, rawC, rawD);
                 return;
             }
 
@@ -190,32 +277,20 @@ internal sealed class EncoderState
                 _lastSpeedAngle = _continuousAngle;
             }
 
-            EmitSnapshot(a, b, z, rawA, rawB, rawZ, volts);
+            EmitSnapshot(a, b, z, rawA, rawB, rawZ, rawC, rawD);
         }
     }
 
-    private void EmitSnapshot(double a, double b, double z, double rawA, double rawB, double rawZ, double[] volts)
+    private void EmitSnapshot(double a, double b, double z,
+                              double rawA, double rawB, double rawZ,
+                              double rawC, double rawD)
     {
         double angleDeg = (_continuousAngle * 180 / Math.PI) % 360;
         if (angleDeg < 0) angleDeg += 360;
         int dir = _speedRps > 0.02 ? 1 : (_speedRps < -0.02 ? -1 : 0);
 
-        // CD 解算
-        double c = 0, d = 0;
-        if (_cdValid)
-        {
-            double rawC = Diff(volts, _chCp, _chCn);
-            double rawD = Diff(volts, _chDp, _chDn);
-            c = rawC - _offsetC;
-            d = rawD - _offsetD;
-            const double minAmp = 0.01;
-            if (Math.Abs(c) > minAmp || Math.Abs(d) > minAmp)
-            {
-                double cd = Math.Atan2(d, c) * 180.0 / Math.PI;
-                if (cd < 0) cd += 360;
-                _cdAngleDeg = cd;
-            }
-        }
+        double c = _cdValid ? rawC - _offsetC : 0;
+        double d = _cdValid ? rawD - _offsetD : 0;
 
         double err = 0;
         if (_cdValid && _synced)
@@ -223,14 +298,18 @@ internal sealed class EncoderState
             err = angleDeg - _cdAngleDeg;
             while (err > 180) err -= 360;
             while (err < -180) err += 360;
-            double absErr = Math.Abs(err);
-            if (absErr > _maxErrDeg) _maxErrDeg = absErr;
+
+            if (err < _minErrDeg) _minErrDeg = err;
+            if (err > _maxErrDeg) _maxErrDeg = err;
+            _sumAbsErrDeg += Math.Abs(err);
+            _errCount++;
         }
 
         _snapshot = new EncoderSnapshot
         {
             Valid = true,
             Synced = _synced,
+            SingleEnded = _singleEnded,
             AngleDeg = angleDeg,
             ContinuousTurns = _continuousAngle / (2 * Math.PI),
             SpeedRpm = _speedRps * 60,
@@ -252,14 +331,24 @@ internal sealed class EncoderState
             AbzAngleDeg = angleDeg,
             CdAngleDeg = _cdAngleDeg,
             AngleErrorDeg = err,
-            MaxAngleErrorDeg = _maxErrDeg,
+            MinAngleErrorDeg = _errCount > 0 ? _minErrDeg : 0,
+            MaxAngleErrorDeg = _errCount > 0 ? _maxErrDeg : 0,
+            MeanAbsAngleErrorDeg = _errCount > 0 ? _sumAbsErrDeg / _errCount : 0,
+            AngleErrorSamples = _errCount,
+
+            MeanA = _meanA,
+            MeanB = _meanB,
+            MeanC = _meanC,
+            MeanD = _meanD,
         };
     }
 
     public EncoderSnapshot GetSnapshot() { lock (_lock) return _snapshot; }
 
-    private static double Diff(double[] v, int p, int n)
+    private double ReadRaw(ReadOnlySpan<double> v, int p, int n)
     {
+        if (_singleEnded)
+            return p >= 0 ? v[p] : (n >= 0 ? v[n] : 0);
         if (p >= 0 && n >= 0) return v[p] - v[n];
         if (p >= 0) return v[p];
         if (n >= 0) return -v[n];

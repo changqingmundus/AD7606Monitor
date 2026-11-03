@@ -4,42 +4,72 @@ namespace Ad7606Host;
 
 internal struct ChannelStats
 {
-    public double Dc;          // 中心电压
-    public double Vpp;         // 峰峰值
-    public double Rms;         // 总 RMS
-    public double AcRms;       // 去 DC 后 RMS
-    public double Frequency;   // 主频
+    public double Dc;
+    public double Vpp;
+    public double Rms;
+    public double AcRms;
+    public double Frequency;
     public double PeakAmplitude;
     public bool Valid;
 }
 
-/// <summary>所有通道滑动窗口统计（采集线程 Push，UI 线程 GetStats）</summary>
+internal struct ChannelStatsCumulative
+{
+    public double MinDc, MaxDc, SumDc;
+    public double MinVpp, MaxVpp, SumVpp;
+    public long Count;
+
+    public bool Valid => Count > 0;
+    public double AvgDc => Count > 0 ? SumDc / Count : 0;
+    public double AvgVpp => Count > 0 ? SumVpp / Count : 0;
+
+    public static ChannelStatsCumulative Empty => new ChannelStatsCumulative
+    {
+        MinDc = double.PositiveInfinity,
+        MaxDc = double.NegativeInfinity,
+        MinVpp = double.PositiveInfinity,
+        MaxVpp = double.NegativeInfinity,
+        Count = 0,
+    };
+}
+
 internal sealed class SignalStats
 {
     public const int Channels = 8;
     public const int WindowSize = 16384;
-    private const int FftSize = 8192;    // 内部频率分析用，够 160kHz 下覆盖 51ms
+    private const int FftSize = 8192;
 
     private readonly object _lock = new();
     private readonly double[] ring = new double[WindowSize * Channels];
     private int writeIdx;
     private long totalWrites;
-    private double sampleRate = 200_000;
+    private long sampleRateBits = BitConverter.DoubleToInt64Bits(200_000);
     private readonly ChannelStats[] results = new ChannelStats[Channels];
+    private readonly ChannelStatsCumulative[] cumulative = new ChannelStatsCumulative[Channels];
     private long lastAnalyzeMs;
+    private int analysisQueued;
 
     private readonly Complex[] fftWork = new Complex[FftSize];
-    private readonly double[] work = new double[FftSize];
+    private readonly double[] copyBuf = new double[FftSize];
+
+    public SignalStats()
+    {
+        for (int ch = 0; ch < Channels; ch++)
+            cumulative[ch] = ChannelStatsCumulative.Empty;
+    }
 
     public void SetSampleRate(double hz)
     {
-        if (hz <= 0) return;
-        lock (_lock) sampleRate = hz;
+        if (hz > 0) Interlocked.Exchange(ref sampleRateBits, BitConverter.DoubleToInt64Bits(hz));
     }
+
+    private double SampleRate => BitConverter.Int64BitsToDouble(Interlocked.Read(ref sampleRateBits));
+
     public int WindowPoints => WindowSize;
 
     public void Push(ReadOnlySpan<double> frame)
     {
+        bool needAnalyze = false;
         lock (_lock)
         {
             int baseIdx = writeIdx * Channels;
@@ -49,68 +79,72 @@ internal sealed class SignalStats
             totalWrites++;
 
             long now = Environment.TickCount64;
-            if (now - lastAnalyzeMs < 300) return;
-            lastAnalyzeMs = now;
-            if (totalWrites >= FftSize) AnalyzeAll();
+            if (now - lastAnalyzeMs >= 300 && totalWrites >= FftSize)
+            {
+                lastAnalyzeMs = now;
+                needAnalyze = true;
+            }
         }
-    }
-
-    public ChannelStats GetStats(int ch) { lock (_lock) return results[ch]; }
-
-    public int CopyRecent(int ch, Span<double> dst)
-    {
-        lock (_lock)
+        // FFT across all channels is comparatively expensive. Never hold up the USB reader for it;
+        // keep one analysis worker at a time and let it use the latest ring-buffer snapshot.
+        if (needAnalyze && Interlocked.Exchange(ref analysisQueued, 1) == 0)
         {
-            int count = (int)Math.Min(totalWrites, WindowSize);
-            int n = Math.Min(dst.Length, count);
-            int start = (writeIdx + WindowSize - n) % WindowSize;
-            for (int k = 0; k < n; k++)
-                dst[k] = ring[((start + k) % WindowSize) * Channels + ch];
-            for (int k = n; k < dst.Length; k++) dst[k] = 0;
-            return n;
+            _ = Task.Run(() =>
+            {
+                try { AnalyzeAll(); }
+                finally { Volatile.Write(ref analysisQueued, 0); }
+            });
         }
     }
 
     private void AnalyzeAll()
     {
-        double sr = sampleRate;
+        double sr = SampleRate;
         double binHz = sr / FftSize;
+        double[] local = copyBuf;
 
         for (int ch = 0; ch < Channels; ch++)
         {
-            int start = (writeIdx + WindowSize - FftSize) % WindowSize;
+            int start;
+            lock (_lock)
+            {
+                start = (writeIdx + WindowSize - FftSize) % WindowSize;
+                for (int k = 0; k < FftSize; k++)
+                    local[k] = ring[((start + k) % WindowSize) * Channels + ch];
+            }
+
             double sum = 0, sum2 = 0, mn = double.MaxValue, mx = double.MinValue;
             for (int k = 0; k < FftSize; k++)
             {
-                double v = ring[((start + k) % WindowSize) * Channels + ch];
-                work[k] = v;
+                double v = local[k];
                 sum += v; sum2 += v * v;
                 if (v < mn) mn = v;
                 if (v > mx) mx = v;
             }
             double dc = sum / FftSize;
             double rms = Math.Sqrt(sum2 / FftSize);
+            double vpp = mx - mn;
 
-            if (rms < 1e-6 || (mx - mn) < 1e-4)
+            if (rms < 1e-6 || vpp < 1e-4)
             {
-                results[ch] = new ChannelStats
+                lock (_lock) results[ch] = new ChannelStats
                 {
                     Dc = dc,
-                    Vpp = mx - mn,
+                    Vpp = vpp,
                     Rms = rms,
                     AcRms = 0,
                     Frequency = 0,
                     PeakAmplitude = 0,
                     Valid = true
                 };
+                UpdateCumulative(ch, dc, vpp);
                 continue;
             }
 
-            // 去 DC + Hann
             for (int k = 0; k < FftSize; k++)
             {
                 double w = 0.5 * (1 - Math.Cos(2 * Math.PI * k / (FftSize - 1)));
-                fftWork[k] = new Complex((work[k] - dc) * w, 0);
+                fftWork[k] = new Complex((local[k] - dc) * w, 0);
             }
             FftEngine.Forward(fftWork);
 
@@ -131,22 +165,65 @@ internal sealed class SignalStats
                 double m2 = fftWork[peakBin + 1].Magnitude * magScale;
                 double denom = m0 - 2 * m1 + m2;
                 if (Math.Abs(denom) > 1e-12)
-                {
-                    double delta = 0.5 * (m0 - m2) / denom;
-                    freq = (peakBin + delta) * binHz;
-                }
+                    freq = (peakBin + 0.5 * (m0 - m2) / denom) * binHz;
             }
 
-            results[ch] = new ChannelStats
+            lock (_lock) results[ch] = new ChannelStats
             {
                 Dc = dc,
-                Vpp = mx - mn,
+                Vpp = vpp,
                 Rms = rms,
                 AcRms = Math.Sqrt(Math.Max(0, rms * rms - dc * dc)),
                 Frequency = freq,
                 PeakAmplitude = peakMag,
                 Valid = true
             };
+
+            UpdateCumulative(ch, dc, vpp);
+        }
+    }
+
+    private void UpdateCumulative(int ch, double dc, double vpp)
+    {
+        lock (_lock)
+        {
+            cumulative[ch].MinDc = Math.Min(cumulative[ch].MinDc, dc);
+            cumulative[ch].MaxDc = Math.Max(cumulative[ch].MaxDc, dc);
+            cumulative[ch].SumDc += dc;
+            cumulative[ch].MinVpp = Math.Min(cumulative[ch].MinVpp, vpp);
+            cumulative[ch].MaxVpp = Math.Max(cumulative[ch].MaxVpp, vpp);
+            cumulative[ch].SumVpp += vpp;
+            cumulative[ch].Count++;
+        }
+    }
+
+    public ChannelStats GetStats(int ch) { lock (_lock) return results[ch]; }
+
+    public ChannelStatsCumulative GetCumulativeStats(int ch)
+    {
+        lock (_lock) return cumulative[ch];
+    }
+
+    public void ResetCumulative()
+    {
+        lock (_lock)
+        {
+            for (int ch = 0; ch < Channels; ch++)
+                cumulative[ch] = ChannelStatsCumulative.Empty;
+        }
+    }
+
+    public int CopyRecent(int ch, Span<double> dst)
+    {
+        lock (_lock)
+        {
+            int count = (int)Math.Min(totalWrites, WindowSize);
+            int n = Math.Min(dst.Length, count);
+            int start = (writeIdx + WindowSize - n) % WindowSize;
+            for (int k = 0; k < n; k++)
+                dst[k] = ring[((start + k) % WindowSize) * Channels + ch];
+            for (int k = n; k < dst.Length; k++) dst[k] = 0;
+            return n;
         }
     }
 }
