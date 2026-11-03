@@ -111,6 +111,18 @@ public sealed class MainForm : Form
     private readonly Label encoderDiagLabel = new() { AutoSize = true, Text = "", ForeColor = Color.DimGray, Font = new Font("Microsoft YaHei UI", 8.5f), Padding = new Padding(0, 4, 0, 0) };
     private readonly Button encoderErrResetButton = new() { Text = "误差清零", AutoSize = true };
 
+    // S120 动态漂移监控参数
+    private readonly NumericUpDown encoderLimitDegBox = new() { Minimum = 0.1M, Maximum = 180M, DecimalPlaces = 2, Increment = 0.5M, Value = 15M, Width = 70 };
+    private readonly NumericUpDown encoderPolePairsBox = new() { Minimum = 0, Maximum = 1000, Value = 0, Width = 60 };
+    private readonly NumericUpDown encoderBaselineLearnBox = new() { Minimum = 0.1M, Maximum = 10M, DecimalPlaces = 2, Increment = 0.1M, Value = 0.5M, Width = 60 };
+    private readonly Button encoderReloadBaselineButton = new() { Text = "重新学习基准", AutoSize = true };
+    private readonly Button encoderResetAlarmButton = new() { Text = "报警清零", AutoSize = true };
+
+    private readonly Label encoderBaselineLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderDriftLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderMaxDriftLabel = new() { AutoSize = false, Text = "—", Font = new Font("Consolas", 26, FontStyle.Bold), ForeColor = Color.FromArgb(35, 55, 80), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label encoderAlarmStatusLabel = new() { AutoSize = false, Text = "—", Font = new Font("Microsoft YaHei UI", 28, FontStyle.Bold), ForeColor = Color.DimGray, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
+
     // --- 数据 ---
     private SerialPort? serial;
     private Ftd2xxUsb? usb;
@@ -264,6 +276,12 @@ public sealed class MainForm : Form
         encoderResetButton.Click += (_, _) => encoder.ZeroAngle();
         errorFramesButton.Click += (_, _) => ShowErrorFrames();
         waveform.Paint += DrawWaveform;
+
+        encoderLimitDegBox.ValueChanged += (_, _) => UpdateEncoderLimits();
+        encoderPolePairsBox.ValueChanged += (_, _) => UpdateEncoderLimits();
+        encoderBaselineLearnBox.ValueChanged += (_, _) => UpdateEncoderLimits();
+        encoderReloadBaselineButton.Click += (_, _) => { encoder.ReloadBaseline(); UpdateEncoderUi(); };
+        encoderResetAlarmButton.Click += (_, _) => { encoder.ResetAlarm(); UpdateEncoderUi(); };
 
         resetWaveStatsButton.Click += (_, _) =>
         {
@@ -525,6 +543,17 @@ public sealed class MainForm : Form
         row2.Controls.Add(encoderCaptureOffsetsButton);
         root.Controls.Add(row2, 0, 1);
 
+        var row3 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 0, 0, 6) };
+        row3.Controls.Add(new Label { Text = "报警阈值(机械角°)：", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
+        row3.Controls.Add(encoderLimitDegBox);
+        row3.Controls.Add(new Label { Text = "极对数：", AutoSize = true, Padding = new Padding(12, 6, 4, 0) });
+        row3.Controls.Add(encoderPolePairsBox);
+        row3.Controls.Add(new Label { Text = "基准学习时长(s)：", AutoSize = true, Padding = new Padding(12, 6, 4, 0) });
+        row3.Controls.Add(encoderBaselineLearnBox);
+        row3.Controls.Add(encoderReloadBaselineButton);
+        row3.Controls.Add(encoderResetAlarmButton);
+        root.Controls.Add(row3, 0, 2);
+
         var big = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 3 };
         for (int c = 0; c < 3; c++) big.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
         for (int r = 0; r < 3; r++) big.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 3));
@@ -647,6 +676,13 @@ public sealed class MainForm : Form
         SetStatus($"已取均值：A={a:F3}V B={b:F3}V C={c:F3}V D={d:F3}V", false);
     }
 
+    private void UpdateEncoderLimits()
+    {
+        encoder.UpdateLimits(
+            (double)encoderLimitDegBox.Value,
+            (int)encoderPolePairsBox.Value,
+            (double)encoderBaselineLearnBox.Value);
+    }
     private void AddEncChannels(FlowLayoutPanel row, string pLabel, string nLabel, int pi, int ni, Color c)
     {
         row.Controls.Add(new Label { Text = pLabel, AutoSize = true, Padding = new Padding(12, 7, 2, 0), ForeColor = c, Font = new Font(Font, FontStyle.Bold) });
@@ -875,6 +911,10 @@ public sealed class MainForm : Form
             OffsetZ = (double)offsetZBox.Value,
             OffsetC = (double)offsetCBox.Value,
             OffsetD = (double)offsetDBox.Value,
+            // 新增
+            ErrorLimitDeg = (double)encoderLimitDegBox.Value,
+            BaselineLearnSeconds = (double)encoderBaselineLearnBox.Value,
+            PolePairs = (int)encoderPolePairsBox.Value,
         };
         double initialRate = options.IsUsb ? options.SampleRate : 1000.0 / Math.Max(1, options.IntervalMs);
         waveformSampleRate = initialRate;
@@ -1399,7 +1439,7 @@ public sealed class MainForm : Form
         else encoderAngleLabel.Text = $"{snap.AngleDeg:F2}°";
         abzDial.SetAngle(snap.AbzAngleDeg, snap.Synced, snap.Synced ? $"{snap.AbzAngleDeg:F2}°" : "等待 Z");
         cdDial.SetAngle(snap.CdAngleDeg, snap.CdValid, snap.CdValid ? $"{snap.CdAngleDeg:F2}°" : "未配置");
-        double corrected = (snap.AbzAngleDeg - snap.AngleErrorDeg + 360) % 360;
+        double corrected = (snap.AbzAngleDeg - snap.InstantErrorDeg + 360) % 360;
         correctedDial.SetAngle(corrected, snap.CdValid && snap.Synced, snap.CdValid && snap.Synced ? $"{corrected:F2}°" : "等待同步");
         encoderSpeedLabel.Text = $"{snap.SpeedRpm:F2} rpm";
 
@@ -1407,16 +1447,32 @@ public sealed class MainForm : Form
         else if (snap.Direction < 0) { encoderDirLabel.Text = "CCW ↺"; encoderDirLabel.ForeColor = Color.OrangeRed; }
         else { encoderDirLabel.Text = "静止"; encoderDirLabel.ForeColor = Color.DimGray; }
 
-        bool hasErr = snap.CdValid && snap.Synced && snap.AngleErrorSamples > 0;
-        if (snap.CdValid)
+        if (!snap.CdValid)
         {
+            encoderCdPosLabel.Text = "未配置";
+            encoderErrLabel.Text = "未配置";
+            encoderBaselineLabel.Text = "未配置";
+            encoderDriftLabel.Text = "未配置";
+            encoderMaxDriftLabel.Text = "未配置";
+            encoderAlarmStatusLabel.Text = "未配置";
+            encoderCdPosLabel.ForeColor = Color.DimGray;
+            encoderErrLabel.ForeColor = Color.DimGray;
+            encoderBaselineLabel.ForeColor = Color.DimGray;
+            encoderDriftLabel.ForeColor = Color.DimGray;
+            encoderMaxDriftLabel.ForeColor = Color.DimGray;
+            encoderAlarmStatusLabel.ForeColor = Color.DimGray;
+        }
+        else
+        {
+            // CD 绝对位置
             encoderCdPosLabel.Text = $"{snap.CdAngleDeg:F2}°";
             encoderCdPosLabel.ForeColor = Color.FromArgb(35, 55, 80);
 
+            // 瞬时误差
             if (snap.Synced)
             {
-                encoderErrLabel.Text = $"{snap.AngleErrorDeg:+0.00;-0.00;0.00}°";
-                encoderErrLabel.ForeColor = Math.Abs(snap.AngleErrorDeg) > 10 ? Color.Firebrick : Color.FromArgb(35, 55, 80);
+                encoderErrLabel.Text = $"{snap.InstantErrorDeg:+0.00;-0.00;0.00}°";
+                encoderErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
             }
             else
             {
@@ -1424,38 +1480,82 @@ public sealed class MainForm : Form
                 encoderErrLabel.ForeColor = Color.DimGray;
             }
 
-            encoderErrCountLabel.Text = snap.AngleErrorSamples.ToString("N0");
-            encoderErrCountLabel.ForeColor = Color.FromArgb(35, 55, 80);
+            // 基准偏差
+            if (snap.BaselineReady)
+            {
+                encoderBaselineLabel.Text = $"{snap.BaselineErrorDeg:+0.00;-0.00;0.00}°";
+                encoderBaselineLabel.ForeColor = Color.FromArgb(35, 55, 80);
+            }
+            else if (snap.Synced)
+            {
+                double pct = snap.BaselineLearnTarget > 0
+                    ? Math.Min(100, snap.BaselineLearnProgress * 100.0 / snap.BaselineLearnTarget)
+                    : 0;
+                encoderBaselineLabel.Text = $"学习中 {pct:F0}%";
+                encoderBaselineLabel.ForeColor = Color.DarkOrange;
+            }
+            else
+            {
+                encoderBaselineLabel.Text = "—(等待Z)";
+                encoderBaselineLabel.ForeColor = Color.DimGray;
+            }
 
-            encoderMinErrLabel.Text = hasErr ? $"{snap.MinAngleErrorDeg:+0.00;-0.00;0.00}°" : "—";
-            encoderMinErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+            // 当前漂移
+            if (snap.BaselineReady)
+            {
+                encoderDriftLabel.Text = $"{snap.DriftDeg:+0.00;-0.00;0.00}°";
+                encoderDriftLabel.ForeColor = snap.AlarmActive ? Color.Firebrick : Color.FromArgb(35, 55, 80);
+            }
+            else
+            {
+                encoderDriftLabel.Text = "—(等待基准)";
+                encoderDriftLabel.ForeColor = Color.DimGray;
+            }
 
-            encoderMaxErrLabel.Text = hasErr ? $"{snap.MaxAngleErrorDeg:+0.00;-0.00;0.00}°" : "—";
-            encoderMaxErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+            // 最大漂移
+            if (snap.BaselineReady)
+            {
+                string txt = $"{snap.MaxDriftDeg:F2}° / ±{snap.LimitDeg:F1}°";
+                if (snap.PolePairs > 0)
+                    txt += $"\n(电 {snap.ElectricDriftDeg:F1}° / ±{snap.ElectricLimitDeg:F0}°)";
+                encoderMaxDriftLabel.Text = txt;
+                encoderMaxDriftLabel.ForeColor = snap.MaxDriftDeg > snap.LimitDeg
+                    ? Color.Firebrick : Color.FromArgb(35, 55, 80);
+            }
+            else
+            {
+                encoderMaxDriftLabel.Text = "—";
+                encoderMaxDriftLabel.ForeColor = Color.DimGray;
+            }
 
-            encoderMeanErrLabel.Text = hasErr ? $"{snap.MeanAbsAngleErrorDeg:F2}°" : "—";
-            encoderMeanErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+            // 报警状态
+            if (!snap.Synced)
+            {
+                encoderAlarmStatusLabel.Text = "等待Z";
+                encoderAlarmStatusLabel.ForeColor = Color.DimGray;
+            }
+            else if (!snap.BaselineReady)
+            {
+                encoderAlarmStatusLabel.Text = "学习基准中";
+                encoderAlarmStatusLabel.ForeColor = Color.DarkOrange;
+            }
+            else if (snap.AlarmActive)
+            {
+                encoderAlarmStatusLabel.Text = "⚠ 报警";
+                encoderAlarmStatusLabel.ForeColor = Color.Firebrick;
+            }
+            else
+            {
+                encoderAlarmStatusLabel.Text = "正常";
+                encoderAlarmStatusLabel.ForeColor = Color.SeaGreen;
+            }
         }
-        else
+
+        encoderDiagLabel.Text = $"原始 A={snap.RawA:+0.000;-0.000;0.000}V B={snap.RawB:+0.000;-0.000;0.000}V Z={snap.RawZ:+0.000;-0.000;0.000}V · 峰值 A={snap.PeakA:F3}V B={snap.PeakB:F3}V · dt={snap.DtPerFrameMs:F4}ms · {(snap.Synced ? "已同步" : "未同步")} · 模式：{(snap.SingleEnded ? "单端" : "差分")}";
+        if (snap.CdValid && snap.AngleErrorSamples > 0)
         {
-            encoderCdPosLabel.Text = "未配置";
-            encoderErrLabel.Text = "未配置";
-            encoderErrCountLabel.Text = "未配置";
-            encoderMinErrLabel.Text = "未配置";
-            encoderMaxErrLabel.Text = "未配置";
-            encoderMeanErrLabel.Text = "未配置";
-            encoderCdPosLabel.ForeColor = Color.DimGray;
-            encoderErrLabel.ForeColor = Color.DimGray;
-            encoderErrCountLabel.ForeColor = Color.DimGray;
-            encoderMinErrLabel.ForeColor = Color.DimGray;
-            encoderMaxErrLabel.ForeColor = Color.DimGray;
-            encoderMeanErrLabel.ForeColor = Color.DimGray;
+            encoderDiagLabel.Text += $" · 原误差 min/max/mean = {snap.MinAngleErrorDeg:+0.00;-0.00;0.00}°/{snap.MaxAngleErrorDeg:+0.00;-0.00;0.00}°/{snap.MeanAbsAngleErrorDeg:F2}° (N={snap.AngleErrorSamples:N0})";
         }
-
-        encoderTurnsLabel.Text = $"累计 {snap.ContinuousTurns:F3} 圈 · Z 脉冲 {snap.ZPulseCount}";
-        encoderABZLabel.Text = $"A={snap.A:+0.000;-0.000;0.000}V B={snap.B:+0.000;-0.000;0.000}V Z={snap.Z:+0.000;-0.000;0.000}V";
-        encoderDiagLabel.Text = $"原始 A={snap.RawA:+0.000;-0.000;0.000}V B={snap.RawB:+0.000;-0.000;0.000}V Z={snap.RawZ:+0.000;-0.000;0.000}V · 峰值 A={snap.PeakA:F3}V B={snap.PeakB:F3}V · dt={snap.DtPerFrameMs:F4}ms · {(snap.Synced ? "已同步" : "未同步")}";
-        encoderDiagLabel.Text += $" · 模式：{(snap.SingleEnded ? "单端" : "差分")}";
     }
 
     // ============================ UART 轮询 ============================
