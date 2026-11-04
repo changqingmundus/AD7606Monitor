@@ -488,18 +488,28 @@ public sealed class MainForm : Form
     private TabPage BuildEncoderTab()
     {
         var page = new TabPage("编码器解算") { BackColor = BackColor };
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14), RowCount = 6, ColumnCount = 1 };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 360));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 210));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(14),
+            RowCount = 7,
+            ColumnCount = 1,
+        };
 
+        // 显式定义 7 行的尺寸
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));          // 0: 通道选择工具条
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));          // 1: 偏置工具条
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));          // 2: S120 参数工具条
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));      // 3: 卡片区（占满剩余）
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));     // 4: 三个圆盘
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));          // 5: 累计/诊断行
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));          // 6: 说明文字
+
+        // ---------- row 0: 通道选择 ----------
         var row1 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
         row1.Controls.Add(encoderEnableCheck);
         row1.Controls.Add(new Label { Text = "模式：", AutoSize = true, Padding = new Padding(8, 7, 2, 0) });
-        row1.Controls.Add(encoderModeBox);            // 单端 / 差分
+        row1.Controls.Add(encoderModeBox);
         AddEncChannels(row1, "A+", "A-", 0, 1, Color.DodgerBlue);
         AddEncChannels(row1, "B+", "B-", 2, 3, Color.OrangeRed);
         AddEncChannels(row1, "Z+", "Z-", 4, 5, Color.SeaGreen);
@@ -507,28 +517,29 @@ public sealed class MainForm : Form
         AddEncChannels(row1, "D+", "D-", 8, 9, Color.DarkOrange);
         root.Controls.Add(row1, 0, 0);
 
-        // 在 encoderEnableCheck 等 UI 创建完之后
-        encoderModeBox.Items.AddRange(new object[] { "单端", "差分" });
-        encoderModeBox.SelectedIndex = 0;                  // 默认单端
-        encoderModeBox.SelectedIndexChanged += (_, _) => UpdateEncoderModeUi();
+        // 一次性初始化（如果还没在构造函数里初始化，就放在这里）
+        if (encoderModeBox.Items.Count == 0)
+        {
+            encoderModeBox.Items.AddRange(new object[] { "单端", "差分" });
+            encoderModeBox.SelectedIndex = 0;
+            encoderModeBox.SelectedIndexChanged += (_, _) => UpdateEncoderModeUi();
 
-        // offset 默认 2.5V（匹配单端 2.5V 中心）
-        offsetABox.Value = 2.5m;
-        offsetBBox.Value = 2.5m;
-        offsetZBox.Value = 2.5m;
-        offsetCBox.Value = 2.5m;
-        offsetDBox.Value = 2.5m;
+            offsetABox.Value = 2.5m;
+            offsetBBox.Value = 2.5m;
+            offsetZBox.Value = 2.5m;
+            offsetCBox.Value = 2.5m;
+            offsetDBox.Value = 2.5m;
 
-        // 运行时热更新 offset（不必停止采集）
-        offsetABox.ValueChanged += (_, _) => SyncEncoderOffsets();
-        offsetBBox.ValueChanged += (_, _) => SyncEncoderOffsets();
-        offsetZBox.ValueChanged += (_, _) => SyncEncoderOffsets();
-        offsetCBox.ValueChanged += (_, _) => SyncEncoderOffsets();
-        offsetDBox.ValueChanged += (_, _) => SyncEncoderOffsets();
+            offsetABox.ValueChanged += (_, _) => SyncEncoderOffsets();
+            offsetBBox.ValueChanged += (_, _) => SyncEncoderOffsets();
+            offsetZBox.ValueChanged += (_, _) => SyncEncoderOffsets();
+            offsetCBox.ValueChanged += (_, _) => SyncEncoderOffsets();
+            offsetDBox.ValueChanged += (_, _) => SyncEncoderOffsets();
 
-        encoderCaptureOffsetsButton.Click += (_, _) => CaptureEncoderOffsets();
+            encoderCaptureOffsetsButton.Click += (_, _) => CaptureEncoderOffsets();
+        }
 
-
+        // ---------- row 1: 偏置 ----------
         var row2 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 6, 0, 6) };
         row2.Controls.Add(new Label { Text = "每转线数：", AutoSize = true, Padding = new Padding(0, 6, 2, 0) });
         row2.Controls.Add(encoderLinesBox);
@@ -543,6 +554,7 @@ public sealed class MainForm : Form
         row2.Controls.Add(encoderCaptureOffsetsButton);
         root.Controls.Add(row2, 0, 1);
 
+        // ---------- row 2: S120 参数 ----------
         var row3 = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 0, 0, 6) };
         row3.Controls.Add(new Label { Text = "报警阈值(机械角°)：", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
         row3.Controls.Add(encoderLimitDegBox);
@@ -554,26 +566,30 @@ public sealed class MainForm : Form
         row3.Controls.Add(encoderResetAlarmButton);
         root.Controls.Add(row3, 0, 2);
 
-        var big = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 3 };
+        // ---------- row 3: 4×3 卡片（占满剩余高度）----------
+        var big = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 4 };
         for (int c = 0; c < 3; c++) big.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
-        for (int r = 0; r < 3; r++) big.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 3));
+        for (int r = 0; r < 4; r++) big.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
+
         big.Controls.Add(MakeBigCard("ABZ 绝对角度", encoderAngleLabel, Color.DodgerBlue), 0, 0);
         big.Controls.Add(MakeBigCard("转速", encoderSpeedLabel, Color.OrangeRed), 1, 0);
         big.Controls.Add(MakeBigCard("旋转方向", encoderDirLabel, Color.SeaGreen), 2, 0);
+
         big.Controls.Add(MakeBigCard("CD 绝对位置", encoderCdPosLabel, Color.MediumPurple), 0, 1);
-        big.Controls.Add(MakeBigCard("当前误差", encoderErrLabel, Color.DarkOrange), 1, 1);
-        big.Controls.Add(MakeBigCard("误差样本数", encoderErrCountLabel, Color.Gray), 2, 1);
-        big.Controls.Add(MakeBigCard("最小误差", encoderMinErrLabel, Color.SteelBlue), 0, 2);
-        big.Controls.Add(MakeBigCard("最大误差", encoderMaxErrLabel, Color.DeepPink), 1, 2);
-        big.Controls.Add(MakeBigCard("平均误差 (MAE)", encoderMeanErrLabel, Color.Crimson), 2, 2);
-        root.Controls.Add(big, 0, 2);
+        big.Controls.Add(MakeBigCard("瞬时误差 (ABZ−CD)", encoderErrLabel, Color.DarkOrange), 1, 1);
+        big.Controls.Add(MakeBigCard("基准偏差（学习值）", encoderBaselineLabel, Color.SteelBlue), 2, 1);
 
-        var info = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
-        info.Controls.Add(encoderTurnsLabel);
-        info.Controls.Add(encoderABZLabel);
-        info.Controls.Add(encoderDiagLabel);
-        root.Controls.Add(info, 0, 3);
+        big.Controls.Add(MakeBigCard("当前漂移", encoderDriftLabel, Color.Crimson), 0, 2);
+        big.Controls.Add(MakeBigCard("最大漂移 / 阈值", encoderMaxDriftLabel, Color.DeepPink), 1, 2);
+        big.Controls.Add(MakeBigCard("报警状态", encoderAlarmStatusLabel, Color.Firebrick), 2, 2);
 
+        big.Controls.Add(MakeBigCard("误差最小值 (诊断)", encoderMinErrLabel, Color.SteelBlue), 0, 3);
+        big.Controls.Add(MakeBigCard("误差最大值 (诊断)", encoderMaxErrLabel, Color.DeepPink), 1, 3);
+        big.Controls.Add(MakeBigCard("误差平均 |·| (诊断)", encoderMeanErrLabel, Color.Crimson), 2, 3);
+
+        root.Controls.Add(big, 0, 3);
+
+        // ---------- row 4: 三个圆盘（固定 220 高）----------
         var dials = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 8, 0, 0) };
         for (int c = 0; c < 3; c++) dials.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
         dials.Controls.Add(MakeDialCard("ABZ 当前角度", abzDial), 0, 0);
@@ -581,6 +597,14 @@ public sealed class MainForm : Form
         dials.Controls.Add(MakeDialCard("误差修正绝对角度", correctedDial), 2, 0);
         root.Controls.Add(dials, 0, 4);
 
+        // ---------- row 5: 累计/诊断行 ----------
+        var info = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
+        info.Controls.Add(encoderTurnsLabel);
+        info.Controls.Add(encoderABZLabel);
+        info.Controls.Add(encoderDiagLabel);
+        root.Controls.Add(info, 0, 5);
+
+        // ---------- row 6: 说明 ----------
         var note = new Label
         {
             Dock = DockStyle.Fill,
@@ -594,10 +618,15 @@ public sealed class MainForm : Form
             Font = new Font(Font.FontFamily, 8.5f),
             Padding = new Padding(0, 10, 0, 0),
         };
-        root.Controls.Add(note, 0, 5);
-        page.Controls.Add(root);
+        root.Controls.Add(note, 0, 6);
 
+        page.Controls.Add(root);
         return page;
+    }
+
+    private void InitializeComponent()
+    {
+
     }
 
     private static Control MakeDialCard(string title, DialPanel dial)
@@ -1421,7 +1450,9 @@ public sealed class MainForm : Form
         var snap = encoder.GetSnapshot();
         if (!snap.Valid)
         {
-            abzDial.SetAngle(0, false, "等待采集"); cdDial.SetAngle(0, false, "未配置"); correctedDial.SetAngle(0, false, "等待采集");
+            abzDial.SetAngle(0, false, "等待采集");
+            cdDial.SetAngle(0, false, "未配置");
+            correctedDial.SetAngle(0, false, "等待采集");
             encoderAngleLabel.Text = "—";
             encoderSpeedLabel.Text = "—";
             encoderDirLabel.Text = "未启用";
@@ -1429,6 +1460,12 @@ public sealed class MainForm : Form
             encoderCdPosLabel.Text = "—";
             encoderErrLabel.Text = "—";
             encoderMaxErrLabel.Text = "—";
+            encoderMinErrLabel.Text = "—";
+            encoderMeanErrLabel.Text = "—";
+            encoderBaselineLabel.Text = "—";
+            encoderDriftLabel.Text = "—";
+            encoderMaxDriftLabel.Text = "—";
+            encoderAlarmStatusLabel.Text = "—";
             encoderTurnsLabel.Text = "累计 — · Z 脉冲 —";
             encoderABZLabel.Text = "A=— B=— Z=—";
             encoderDiagLabel.Text = "";
@@ -1447,6 +1484,8 @@ public sealed class MainForm : Form
         else if (snap.Direction < 0) { encoderDirLabel.Text = "CCW ↺"; encoderDirLabel.ForeColor = Color.OrangeRed; }
         else { encoderDirLabel.Text = "静止"; encoderDirLabel.ForeColor = Color.DimGray; }
 
+        bool hasErr = snap.CdValid && snap.AngleErrorSamples > 0;
+
         if (!snap.CdValid)
         {
             encoderCdPosLabel.Text = "未配置";
@@ -1455,32 +1494,40 @@ public sealed class MainForm : Form
             encoderDriftLabel.Text = "未配置";
             encoderMaxDriftLabel.Text = "未配置";
             encoderAlarmStatusLabel.Text = "未配置";
-            encoderCdPosLabel.ForeColor = Color.DimGray;
-            encoderErrLabel.ForeColor = Color.DimGray;
-            encoderBaselineLabel.ForeColor = Color.DimGray;
-            encoderDriftLabel.ForeColor = Color.DimGray;
-            encoderMaxDriftLabel.ForeColor = Color.DimGray;
-            encoderAlarmStatusLabel.ForeColor = Color.DimGray;
+            encoderMinErrLabel.Text = "未配置";
+            encoderMaxErrLabel.Text = "未配置";
+            encoderMeanErrLabel.Text = "未配置";
+
+            Color gray = Color.DimGray;
+            encoderCdPosLabel.ForeColor = gray;
+            encoderErrLabel.ForeColor = gray;
+            encoderBaselineLabel.ForeColor = gray;
+            encoderDriftLabel.ForeColor = gray;
+            encoderMaxDriftLabel.ForeColor = gray;
+            encoderAlarmStatusLabel.ForeColor = gray;
+            encoderMinErrLabel.ForeColor = gray;
+            encoderMaxErrLabel.ForeColor = gray;
+            encoderMeanErrLabel.ForeColor = gray;
         }
         else
         {
-            // CD 绝对位置
+            // ===== CD 绝对位置 =====
             encoderCdPosLabel.Text = $"{snap.CdAngleDeg:F2}°";
             encoderCdPosLabel.ForeColor = Color.FromArgb(35, 55, 80);
 
-            // 瞬时误差
-            if (snap.Synced)
+            // ===== 瞬时误差（诊断：只要 C/D 有信号就显示）=====
+            if (snap.AngleErrorSamples > 0)
             {
                 encoderErrLabel.Text = $"{snap.InstantErrorDeg:+0.00;-0.00;0.00}°";
-                encoderErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+                encoderErrLabel.ForeColor = snap.Synced ? Color.FromArgb(35, 55, 80) : Color.DarkOrange;
             }
             else
             {
-                encoderErrLabel.Text = "—(等待Z)";
+                encoderErrLabel.Text = "—";
                 encoderErrLabel.ForeColor = Color.DimGray;
             }
 
-            // 基准偏差
+            // ===== 基准偏差（学习值）=====
             if (snap.BaselineReady)
             {
                 encoderBaselineLabel.Text = $"{snap.BaselineErrorDeg:+0.00;-0.00;0.00}°";
@@ -1500,7 +1547,7 @@ public sealed class MainForm : Form
                 encoderBaselineLabel.ForeColor = Color.DimGray;
             }
 
-            // 当前漂移
+            // ===== 当前漂移 =====
             if (snap.BaselineReady)
             {
                 encoderDriftLabel.Text = $"{snap.DriftDeg:+0.00;-0.00;0.00}°";
@@ -1512,7 +1559,7 @@ public sealed class MainForm : Form
                 encoderDriftLabel.ForeColor = Color.DimGray;
             }
 
-            // 最大漂移
+            // ===== 最大漂移 =====
             if (snap.BaselineReady)
             {
                 string txt = $"{snap.MaxDriftDeg:F2}° / ±{snap.LimitDeg:F1}°";
@@ -1528,7 +1575,7 @@ public sealed class MainForm : Form
                 encoderMaxDriftLabel.ForeColor = Color.DimGray;
             }
 
-            // 报警状态
+            // ===== 报警状态 =====
             if (!snap.Synced)
             {
                 encoderAlarmStatusLabel.Text = "等待Z";
@@ -1549,12 +1596,33 @@ public sealed class MainForm : Form
                 encoderAlarmStatusLabel.Text = "正常";
                 encoderAlarmStatusLabel.ForeColor = Color.SeaGreen;
             }
+
+            // ===== 关键：诊断统计 min/max/mean 三张卡的赋值 =====
+            if (hasErr)
+            {
+                encoderMinErrLabel.Text = $"{snap.MinAngleErrorDeg:+0.00;-0.00;0.00}°";
+                encoderMaxErrLabel.Text = $"{snap.MaxAngleErrorDeg:+0.00;-0.00;0.00}°";
+                encoderMeanErrLabel.Text = $"{snap.MeanAbsAngleErrorDeg:F2}°";
+                encoderMinErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+                encoderMaxErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+                encoderMeanErrLabel.ForeColor = Color.FromArgb(35, 55, 80);
+            }
+            else
+            {
+                encoderMinErrLabel.Text = "—";
+                encoderMaxErrLabel.Text = "—";
+                encoderMeanErrLabel.Text = "—";
+                encoderMinErrLabel.ForeColor = Color.DimGray;
+                encoderMaxErrLabel.ForeColor = Color.DimGray;
+                encoderMeanErrLabel.ForeColor = Color.DimGray;
+            }
         }
 
+        // 诊断行
         encoderDiagLabel.Text = $"原始 A={snap.RawA:+0.000;-0.000;0.000}V B={snap.RawB:+0.000;-0.000;0.000}V Z={snap.RawZ:+0.000;-0.000;0.000}V · 峰值 A={snap.PeakA:F3}V B={snap.PeakB:F3}V · dt={snap.DtPerFrameMs:F4}ms · {(snap.Synced ? "已同步" : "未同步")} · 模式：{(snap.SingleEnded ? "单端" : "差分")}";
         if (snap.CdValid && snap.AngleErrorSamples > 0)
         {
-            encoderDiagLabel.Text += $" · 原误差 min/max/mean = {snap.MinAngleErrorDeg:+0.00;-0.00;0.00}°/{snap.MaxAngleErrorDeg:+0.00;-0.00;0.00}°/{snap.MeanAbsAngleErrorDeg:F2}° (N={snap.AngleErrorSamples:N0})";
+            encoderDiagLabel.Text += $" · N={snap.AngleErrorSamples:N0} (min/max/mean = {snap.MinAngleErrorDeg:+0.00;-0.00;0.00}° / {snap.MaxAngleErrorDeg:+0.00;-0.00;0.00}° / {snap.MeanAbsAngleErrorDeg:F2}°)";
         }
     }
 
