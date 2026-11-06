@@ -64,12 +64,22 @@ public sealed class MainForm : Form
     // --- 频谱页 ---
     private ComboBox? spectrumChannelBox;
     private ComboBox? spectrumNBox;
+    private ComboBox? spectrumReferenceBox;
+    private ComboBox? spectrumWindowBox;
+    private NumericUpDown? spectrumMinHzBox;
+    private NumericUpDown? spectrumMaxHzBox;
+    private CheckBox? spectrumDbCheck;
+    private readonly CheckBox[] spectrumChannelChecks = new CheckBox[8];
     private Button? spectrumRefreshButton;
     private CheckBox? spectrumAutoCheck;
     private SpectrumPanel? spectrumPanel;
     private Label? spectrumInfo;
-    private readonly System.Windows.Forms.Timer spectrumTimer = new() { Interval = 500, Enabled = false };
-
+    private ListView? spectrumMeasurements;
+    private readonly System.Windows.Forms.Timer spectrumTimer = new()
+    {
+        Interval = 500,
+        Enabled = false
+    };
     // --- 李萨如页 ---
     private ComboBox? lissajousXBox;
     private ComboBox? lissajousYBox;
@@ -86,6 +96,9 @@ public sealed class MainForm : Form
     private readonly NumericUpDown encoderLinesBox = new() { Minimum = 1, Maximum = 100000, Value = 1250, Width = 90 };
     private readonly CheckBox encoderInvertZCheck = new() { Text = "Z 极性反转", AutoSize = true, Padding = new Padding(0, 6, 8, 0) };
     private readonly CheckBox encoderAutoCenterCheck = new() { Text = "自动慢速去偏", AutoSize = true, Padding = new Padding(0, 6, 8, 0) };
+    private readonly CheckBox encoderAutoCenterVppCheck = new() { Text = "自动中心(Vpp)", AutoSize = true, Padding = new Padding(0, 6, 8, 0) };
+    private readonly NumericUpDown encoderCdCoverageBox = new() { Minimum = 30, Maximum = 3600, Increment = 30, Value = 360, Width = 70 };
+    private readonly Button encoderResetAutoCenterButton = new() { Text = "重置中心估计", AutoSize = true };
     private readonly NumericUpDown offsetABox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 0, Width = 80 };
     private readonly NumericUpDown offsetBBox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 0, Width = 80 };
     private readonly NumericUpDown offsetZBox = new() { Minimum = -10, Maximum = 10, DecimalPlaces = 3, Increment = 0.1M, Value = 0, Width = 80 };
@@ -523,6 +536,9 @@ public sealed class MainForm : Form
             encoderModeBox.Items.AddRange(new object[] { "单端", "差分" });
             encoderModeBox.SelectedIndex = 0;
             encoderModeBox.SelectedIndexChanged += (_, _) => UpdateEncoderModeUi();
+            encoderAutoCenterVppCheck.CheckedChanged += (_, _) => UpdateEncoderModeUi();
+            encoderResetAutoCenterButton.Click += (_, _) => { encoder.ResetAutoCenter(); UpdateEncoderUi(); };
+            encoderCdCoverageBox.ValueChanged += (_, _) => { /* 下次「开始」时生效 */ };
 
             offsetABox.Value = 2.5m;
             offsetBBox.Value = 2.5m;
@@ -550,6 +566,10 @@ public sealed class MainForm : Form
         AddSpin(row2, "D(V)：", offsetDBox);
         row2.Controls.Add(encoderInvertZCheck);
         row2.Controls.Add(encoderAutoCenterCheck);
+        row2.Controls.Add(encoderAutoCenterVppCheck);       // ← 新增
+        row2.Controls.Add(new Label { Text = "C/D覆盖°：", AutoSize = true, Padding = new Padding(8, 6, 2, 0) });
+        row2.Controls.Add(encoderCdCoverageBox);
+        row2.Controls.Add(encoderResetAutoCenterButton);    // ← 新增
         row2.Controls.Add(encoderResetButton);
         row2.Controls.Add(encoderCaptureOffsetsButton);
         root.Controls.Add(row2, 0, 1);
@@ -624,11 +644,6 @@ public sealed class MainForm : Form
         return page;
     }
 
-    private void InitializeComponent()
-    {
-
-    }
-
     private static Control MakeDialCard(string title, DialPanel dial)
     {
         var card = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Margin = new Padding(6), Padding = new Padding(6) };
@@ -666,14 +681,21 @@ public sealed class MainForm : Form
         }
     }
 
-
-
     /// <summary>单端模式下禁用“-”负极下拉框（视觉上告诉用户不用管）</summary>
     private void UpdateEncoderModeUi()
     {
         bool single = encoderModeBox.SelectedIndex == 0;
-        for (int i = 1; i < 10; i += 2)              // A-, B-, Z-, C-, D- 索引
+        for (int i = 1; i < 10; i += 2)
             encoderBoxes[i].Enabled = !single;
+
+        bool autoVpp = encoderAutoCenterVppCheck.Checked;
+        offsetABox.Enabled = !autoVpp;
+        offsetBBox.Enabled = !autoVpp;
+        offsetZBox.Enabled = !autoVpp;       // Z 在自动模式下仍用固定值，但不需用户改
+        offsetCBox.Enabled = !autoVpp;
+        offsetDBox.Enabled = !autoVpp;
+        encoderAutoCenterCheck.Enabled = !autoVpp;       // 与 Vpp 自动中心冲突，禁用
+        encoderCaptureOffsetsButton.Enabled = !autoVpp;
     }
 
     /// <summary>UI offset 改动后同步给 EncoderState（热更新）</summary>
@@ -729,12 +751,14 @@ public sealed class MainForm : Form
     private TabPage BuildSpectrumTab()
     {
         var tab = new TabPage("频谱分析") { BackColor = BackColor };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Padding = new Padding(10) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1, Padding = new Padding(10) };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 180));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var tools = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
+
         tools.Controls.Add(new Label { Text = "通道：", AutoSize = true, Padding = new Padding(0, 5, 4, 0) });
         spectrumChannelBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90 };
         for (int i = 0; i < 8; i++) spectrumChannelBox.Items.Add($"通道 {i + 1}");
@@ -744,8 +768,30 @@ public sealed class MainForm : Form
         tools.Controls.Add(new Label { Text = "点数：", AutoSize = true, Padding = new Padding(8, 5, 4, 0) });
         spectrumNBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90 };
         spectrumNBox.Items.AddRange(new object[] { "1024", "2048", "4096", "8192", "16384" });
-        spectrumNBox.SelectedIndex = 2;
+        spectrumNBox.SelectedIndex = 3;      // 默认 8192
         tools.Controls.Add(spectrumNBox);
+
+        tools.Controls.Add(new Label { Text = "参考：", AutoSize = true, Padding = new Padding(8, 5, 2, 0) });
+        spectrumReferenceBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 72 };
+        for (int i = 0; i < 8; i++) spectrumReferenceBox.Items.Add($"CH{i + 1}");
+        spectrumReferenceBox.SelectedIndex = 0;
+        tools.Controls.Add(spectrumReferenceBox);
+
+        tools.Controls.Add(new Label { Text = "范围 Hz：", AutoSize = true, Padding = new Padding(8, 5, 2, 0) });
+        spectrumMinHzBox = new NumericUpDown { Minimum = 1, Maximum = 2000000, Value = 10, Width = 68 };
+        spectrumMaxHzBox = new NumericUpDown { Minimum = 10, Maximum = 2000000, Value = 10000, Width = 82 };
+        tools.Controls.Add(spectrumMinHzBox);
+        tools.Controls.Add(new Label { Text = "~", AutoSize = true, Padding = new Padding(2, 5, 2, 0) });
+        tools.Controls.Add(spectrumMaxHzBox);
+
+        tools.Controls.Add(new Label { Text = "窗：", AutoSize = true, Padding = new Padding(8, 5, 2, 0) });
+        spectrumWindowBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 82 };
+        spectrumWindowBox.Items.AddRange(new object[] { "Hann", "Hamming", "Blackman", "Rectangular" });
+        spectrumWindowBox.SelectedIndex = 0;
+        tools.Controls.Add(spectrumWindowBox);
+
+        spectrumDbCheck = new CheckBox { Text = "dBVrms", AutoSize = true, Checked = true, Padding = new Padding(8, 5, 0, 0) };
+        tools.Controls.Add(spectrumDbCheck);
 
         spectrumRefreshButton = new Button { Text = "刷新频谱", AutoSize = true };
         spectrumRefreshButton.Click += (_, _) => RefreshSpectrum();
@@ -755,13 +801,47 @@ public sealed class MainForm : Form
         spectrumAutoCheck.CheckedChanged += (_, _) => spectrumTimer.Enabled = spectrumAutoCheck.Checked;
         tools.Controls.Add(spectrumAutoCheck);
 
+        // 叠加通道复选框
+        var channels = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Padding = new Padding(0, 4, 0, 0) };
+        channels.Controls.Add(new Label { Text = "叠加通道：", AutoSize = true, Padding = new Padding(0, 5, 3, 0) });
+        for (int i = 0; i < 8; i++)
+        {
+            spectrumChannelChecks[i] = new CheckBox
+            {
+                Text = $"CH{i + 1}",
+                AutoSize = true,
+                Checked = i == 0,
+                ForeColor = ChannelColors[i],
+                Padding = new Padding(3, 5, 0, 0)
+            };
+            channels.Controls.Add(spectrumChannelChecks[i]);
+        }
+        tools.Controls.Add(channels);
+
         layout.Controls.Add(tools, 0, 0);
 
         spectrumPanel = new SpectrumPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 6) };
         layout.Controls.Add(spectrumPanel, 0, 1);
 
+        spectrumMeasurements = new ListView
+        {
+            Dock = DockStyle.Fill,
+            View = View.Details,
+            FullRowSelect = true,
+            GridLines = true,
+            Font = new Font("Consolas", 8.5f)
+        };
+        foreach (string header in new[] {
+        "CH", "Fundamental", "Vrms",
+        "H2", "H3", "H4", "H5",
+        "THD", "THD+N", "Noise dBV/√Hz",
+        "DC", "AC RMS", "Phase"
+    })
+            spectrumMeasurements.Columns.Add(header, header.Length > 8 ? 106 : 75, HorizontalAlignment.Center);
+        layout.Controls.Add(spectrumMeasurements, 0, 2);
+
         spectrumInfo = new Label { AutoSize = true, Padding = new Padding(0, 4, 0, 0), ForeColor = Color.DimGray };
-        layout.Controls.Add(spectrumInfo, 0, 2);
+        layout.Controls.Add(spectrumInfo, 0, 3);
 
         tab.Controls.Add(layout);
         return tab;
@@ -922,6 +1002,7 @@ public sealed class MainForm : Form
         {
             Enabled = encoderEnableCheck.Checked,
             SingleEnded = encoderModeBox.SelectedIndex == 0,
+
             ChAp = GetEncChannel(0),
             ChAn = GetEncChannel(1),
             ChBp = GetEncChannel(2),
@@ -944,6 +1025,12 @@ public sealed class MainForm : Form
             ErrorLimitDeg = (double)encoderLimitDegBox.Value,
             BaselineLearnSeconds = (double)encoderBaselineLearnBox.Value,
             PolePairs = (int)encoderPolePairsBox.Value,
+
+            AutoCenterFromVpp = encoderAutoCenterVppCheck.Checked,   // ← 新增
+            VppTrackAlpha = 1e-5,
+            CdCoverageTargetDeg = (double)encoderCdCoverageBox.Value,
+            CdCenterMinSpeedRpm = 3.0,
+            CdCenterTrackAlphaAfterReady = 0.0,   // 0 = 估计完成后冻结
         };
         double initialRate = options.IsUsb ? options.SampleRate : 1000.0 / Math.Max(1, options.IntervalMs);
         waveformSampleRate = initialRate;
@@ -1535,11 +1622,19 @@ public sealed class MainForm : Form
             }
             else if (snap.Synced)
             {
-                double pct = snap.BaselineLearnTarget > 0
-                    ? Math.Min(100, snap.BaselineLearnProgress * 100.0 / snap.BaselineLearnTarget)
-                    : 0;
-                encoderBaselineLabel.Text = $"学习中 {pct:F0}%";
-                encoderBaselineLabel.ForeColor = Color.DarkOrange;
+                if (snap.BaselineBlockedByCdEstimate)
+                {
+                    encoderBaselineLabel.Text = "等待 C/D 中心估计";
+                    encoderBaselineLabel.ForeColor = Color.DarkOrange;
+                }
+                else
+                {
+                    double pct = snap.BaselineLearnTarget > 0
+                        ? Math.Min(100, snap.BaselineLearnProgress * 100.0 / snap.BaselineLearnTarget)
+                        : 0;
+                    encoderBaselineLabel.Text = $"学习中 {pct:F0}%";
+                    encoderBaselineLabel.ForeColor = Color.DarkOrange;
+                }
             }
             else
             {
@@ -1581,6 +1676,11 @@ public sealed class MainForm : Form
                 encoderAlarmStatusLabel.Text = "等待Z";
                 encoderAlarmStatusLabel.ForeColor = Color.DimGray;
             }
+            else if (snap.BaselineBlockedByCdEstimate)
+            {
+                encoderAlarmStatusLabel.Text = "C/D 估计中";
+                encoderAlarmStatusLabel.ForeColor = Color.DarkOrange;
+            }
             else if (!snap.BaselineReady)
             {
                 encoderAlarmStatusLabel.Text = "学习基准中";
@@ -1620,6 +1720,27 @@ public sealed class MainForm : Form
 
         // 诊断行
         encoderDiagLabel.Text = $"原始 A={snap.RawA:+0.000;-0.000;0.000}V B={snap.RawB:+0.000;-0.000;0.000}V Z={snap.RawZ:+0.000;-0.000;0.000}V · 峰值 A={snap.PeakA:F3}V B={snap.PeakB:F3}V · dt={snap.DtPerFrameMs:F4}ms · {(snap.Synced ? "已同步" : "未同步")} · 模式：{(snap.SingleEnded ? "单端" : "差分")}";
+        // 偏置模式显示
+        if (snap.AutoCenterFromVpp)
+        {
+            encoderDiagLabel.Text +=
+                $" · 自动中心 A={snap.UsedCenterA:F3}V(vpp {snap.EstVppA:F3}) " +
+                $"B={snap.UsedCenterB:F3}V(vpp {snap.EstVppB:F3})";
+            if (snap.CdValid)
+            {
+                encoderDiagLabel.Text +=
+                    $" C={snap.UsedCenterC:F3}V(vpp {snap.EstVppC:F3}) " +
+                    $"D={snap.UsedCenterD:F3}V(vpp {snap.EstVppD:F3})";
+                string cdState = snap.CdCenterReady
+                    ? "C/D 中心已就绪"
+                    : $"C/D 估计中 {snap.CdCoverageDeg:F0}°/{snap.CdCoverageTargetDeg:F0}°";
+                encoderDiagLabel.Text += $" · {cdState}";
+            }
+        }
+        else
+        {
+            encoderDiagLabel.Text += " · 固定偏置";
+        }
         if (snap.CdValid && snap.AngleErrorSamples > 0)
         {
             encoderDiagLabel.Text += $" · N={snap.AngleErrorSamples:N0} (min/max/mean = {snap.MinAngleErrorDeg:+0.00;-0.00;0.00}° / {snap.MaxAngleErrorDeg:+0.00;-0.00;0.00}° / {snap.MeanAbsAngleErrorDeg:F2}°)";
@@ -2011,23 +2132,68 @@ public sealed class MainForm : Form
     // ============================ 频谱 / 李萨如 ============================
     private void RefreshSpectrum()
     {
-        if (spectrumPanel is null || spectrumChannelBox is null || spectrumNBox is null || spectrumInfo is null) return;
+        if (spectrumPanel is null || spectrumChannelBox is null || spectrumNBox is null
+            || spectrumInfo is null || spectrumReferenceBox is null || spectrumWindowBox is null
+            || spectrumMinHzBox is null || spectrumMaxHzBox is null || spectrumDbCheck is null
+            || spectrumMeasurements is null) return;
+
         int ch = spectrumChannelBox.SelectedIndex;
         if (ch < 0) ch = 0;
         int n = int.Parse((string)spectrumNBox.SelectedItem!);
         if (n > signalStats.WindowPoints) n = signalStats.WindowPoints;
 
-        var samples = new double[n];
-        int count = signalStats.CopyRecent(ch, samples);
+        var selected = new bool[8];
+        for (int i = 0; i < 8; i++) selected[i] = spectrumChannelChecks[i].Checked;
+        if (!selected.Any(v => v)) selected[ch] = true;
+
+        int reference = spectrumReferenceBox.SelectedIndex < 0 ? ch : spectrumReferenceBox.SelectedIndex;
+        selected[reference] = true;
+
+        var samples = new double[8][];
+        int count = n;
+        for (int i = 0; i < 8; i++)
+        {
+            if (!selected[i]) continue;
+            samples[i] = new double[n];
+            count = Math.Min(count, signalStats.CopyRecent(i, samples[i]));
+        }
         if (count < 32)
         {
             spectrumInfo.Text = "采集数据不足，请先开始读取";
             return;
         }
+
         double sr = IsUsb && waveformSampleRate > 0 ? waveformSampleRate : (double)sampleRateBox.Value;
         spectrumPanel.Channel = ch;
-        spectrumPanel.ComputeAndSet(samples, count, sr);
-        spectrumInfo.Text = spectrumPanel.Info;
+        spectrumPanel.MinDisplayHz = (double)spectrumMinHzBox.Value;
+        spectrumPanel.MaxDisplayHz = Math.Max((double)spectrumMaxHzBox.Value, spectrumPanel.MinDisplayHz + 1);
+        spectrumPanel.UseDb = spectrumDbCheck.Checked;
+        spectrumPanel.Window = (SpectrumWindow)spectrumWindowBox.SelectedIndex;
+        spectrumPanel.ComputeAndSetMulti(samples, count, sr, selected, reference);
+
+        spectrumInfo.Text = spectrumPanel.Info
+            + " · THD：H2~H5 的 RMS 合成；THD+N：排除基频及 H2~H5 各 ±1 bin 后的谱线能量合成；噪声底：该残余 RMS 按分析带宽归一化为 dBV/√Hz。";
+
+        spectrumMeasurements.BeginUpdate();
+        try
+        {
+            spectrumMeasurements.Items.Clear();
+            foreach (var m in spectrumPanel.Measurements)
+            {
+                var row = new ListViewItem($"CH{m.Channel + 1}");
+                row.SubItems.Add($"{m.FundamentalHz:F2} Hz");
+                row.SubItems.Add($"{m.FundamentalVrms:F5} V");
+                for (int h = 0; h < 4; h++) row.SubItems.Add($"{m.HarmonicsVrms[h]:F5} V");
+                row.SubItems.Add($"{m.ThdPercent:F3}%");
+                row.SubItems.Add($"{m.ThdnPercent:F3}%");
+                row.SubItems.Add($"{m.NoiseFloorDbvPerRootHz:F1}");
+                row.SubItems.Add($"{m.Dc:F5} V");
+                row.SubItems.Add($"{m.AcRms:F5} V");
+                row.SubItems.Add($"{m.PhaseDeg:+0.00;-0.00;0.00}°");
+                spectrumMeasurements.Items.Add(row);
+            }
+        }
+        finally { spectrumMeasurements.EndUpdate(); }
     }
 
     private void RefreshLissajous()

@@ -12,10 +12,17 @@ internal sealed class EncoderConfig
     public double OffsetC = 2.5, OffsetD = 2.5;
     public bool AutoCenter;
 
+    // 偏置模式
+    public bool AutoCenterFromVpp;
+    public double VppTrackAlpha = 1e-5;                 // A/B 快追踪
+    public double CdCoverageTargetDeg = 360.0;          // C/D 需要覆盖的机械角（默认一整圈）
+    public double CdCenterMinSpeedRpm = 3.0;            // C/D 估计阶段需要的最低转速
+    public double CdCenterTrackAlphaAfterReady = 0.0;   // 完成后追踪系数（0=冻结）
+
     // S120 动态漂移监控
-    public double ErrorLimitDeg = 15.0;        // 机械角报警阈值
-    public double BaselineLearnSeconds = 0.5;  // 基准学习时长
-    public int PolePairs = 0;                  // 极对数，0 = 仅机械角
+    public double ErrorLimitDeg = 15.0;
+    public double BaselineLearnSeconds = 0.5;
+    public int PolePairs = 0;
 }
 
 internal sealed class EncoderSnapshot
@@ -37,28 +44,39 @@ internal sealed class EncoderSnapshot
     public double CdAngleDeg;
     public double AbzAngleDeg;
 
-    // ===== S120 动态漂移监控 =====
-    public bool BaselineReady;                 // 基准已学习完
-    public double BaselineErrorDeg;            // 学习到的基准偏差
-    public double InstantErrorDeg;             // 瞬时误差 = ABZ − CD
-    public double DriftDeg;                    // 漂移 = 瞬时 − 基准
-    public double MaxDriftDeg;                 // 上电/清零以来最大 |漂移|
-    public bool AlarmActive;                   // |漂移| > 阈值
-    public double LimitDeg;                    // 机械角阈值
+    // S120 动态漂移监控
+    public bool BaselineReady;
+    public double BaselineErrorDeg;
+    public double InstantErrorDeg;
+    public double DriftDeg;
+    public double MaxDriftDeg;
+    public bool AlarmActive;
+    public double LimitDeg;
     public int PolePairs;
-    public double ElectricDriftDeg;            // 漂移 × 极对数
-    public double ElectricLimitDeg;            // 阈值 × 极对数
-    public long BaselineLearnProgress;         // 已学习样本
-    public long BaselineLearnTarget;           // 目标样本
+    public double ElectricDriftDeg;
+    public double ElectricLimitDeg;
+    public long BaselineLearnProgress;
+    public long BaselineLearnTarget;
     public double BaselineLearnSeconds;
+    public bool BaselineBlockedByCdEstimate;   // 新增：C/D 估计未完成，基准学习暂停
 
-    // 原有统计（作为诊断参考）
+    // 诊断
     public double MinAngleErrorDeg;
     public double MaxAngleErrorDeg;
     public double MeanAbsAngleErrorDeg;
     public long AngleErrorSamples;
 
     public double MeanA, MeanB, MeanC, MeanD;
+
+    // 偏置模式诊断
+    public bool AutoCenterFromVpp;
+    public double UsedCenterA, UsedCenterB, UsedCenterC, UsedCenterD;
+    public double EstVppA, EstVppB, EstVppC, EstVppD;
+
+    // C/D 估计状态
+    public bool CdCenterReady;
+    public double CdCoverageDeg;
+    public double CdCoverageTargetDeg;
 }
 
 internal sealed class EncoderState
@@ -83,22 +101,20 @@ internal sealed class EncoderState
     private bool _cdValid;
     private double _cdAngleDeg;
 
-    // 原统计（诊断）
+    // 诊断
     private double _minErrDeg = double.PositiveInfinity;
     private double _maxErrDeg = double.NegativeInfinity;
     private double _sumAbsErrDeg;
     private long _errCount;
 
-    // ===== S120 动态漂移监控 =====
+    // S120
     private double _errorLimitDeg = 15.0;
     private double _baselineLearnSeconds = 0.5;
     private int _polePairs = 0;
-
     private bool _baselineReady;
     private double _baselineErrorSum;
     private long _baselineErrorCount;
     private long _baselineLearnTarget;
-
     private double _baselineErrorDeg;
     private double _instantErrorDeg;
     private double _driftDeg;
@@ -107,6 +123,27 @@ internal sealed class EncoderState
 
     private double _meanA, _meanB, _meanC, _meanD;
     private bool _meanInit;
+
+    // Vpp 自动中心
+    private bool _autoCenterFromVpp;
+    private double _vppTrackAlpha = 1e-5;
+    private double _cdCoverageTargetDeg = 360.0;
+    private double _cdCenterMinSpeedRps = 0.05;
+    private double _cdCenterTrackAlphaAfterReady = 0.0;
+
+    // A/B 快追踪状态
+    private bool _abInit;
+    private double _minA, _maxA, _minB, _maxB;
+    private double _centerA = 2.5, _centerB = 2.5;
+    private double _vppA, _vppB;
+
+    // C/D 慢追踪状态
+    private bool _cdInit;
+    private bool _cdCenterReady;
+    private double _minC, _maxC, _minD, _maxD;
+    private double _centerC = 2.5, _centerD = 2.5;
+    private double _vppC, _vppD;
+    private double _cdCoverageDeg;
 
     private EncoderSnapshot _snapshot = new();
 
@@ -130,6 +167,12 @@ internal sealed class EncoderState
             _baselineLearnSeconds = cfg.BaselineLearnSeconds > 0 ? cfg.BaselineLearnSeconds : 0.5;
             _polePairs = cfg.PolePairs >= 0 ? cfg.PolePairs : 0;
             _baselineLearnTarget = Math.Max(100, (long)(_baselineLearnSeconds / _dtPerFrame));
+
+            _autoCenterFromVpp = cfg.AutoCenterFromVpp;
+            _vppTrackAlpha = cfg.VppTrackAlpha > 0 ? cfg.VppTrackAlpha : 1e-5;
+            _cdCoverageTargetDeg = cfg.CdCoverageTargetDeg > 0 ? cfg.CdCoverageTargetDeg : 360.0;
+            _cdCenterMinSpeedRps = (cfg.CdCenterMinSpeedRpm > 0 ? cfg.CdCenterMinSpeedRpm : 3.0) / 60.0;
+            _cdCenterTrackAlphaAfterReady = cfg.CdCenterTrackAlphaAfterReady;
 
             ResetLocked();
         }
@@ -175,7 +218,6 @@ internal sealed class EncoderState
         lock (_lock) { _meanA = _meanB = _meanC = _meanD = 0; _meanInit = false; }
     }
 
-    /// <summary>重新学习基准（用户主动触发，不要求静止）</summary>
     public void ReloadBaseline()
     {
         lock (_lock)
@@ -190,13 +232,36 @@ internal sealed class EncoderState
         }
     }
 
-    /// <summary>清报警（保留基准）</summary>
-    public void ResetAlarm()
+    /// <summary>重置 Vpp 中心估计（A/B 和 C/D 都重置）</summary>
+    public void ResetAutoCenter()
     {
         lock (_lock)
         {
-            _maxDriftDeg = 0;
-            _alarmActive = false;
+            _abInit = false;
+            _cdInit = false;
+            _cdCenterReady = false;
+            _cdCoverageDeg = 0;
+            _minC = _maxC = _minD = _maxD = 0;
+            _vppC = _vppD = 0;
+            _centerC = _offsetC;
+            _centerD = _offsetD;
+        }
+    }
+
+    public void ResetAlarm()
+    {
+        lock (_lock) { _maxDriftDeg = 0; _alarmActive = false; }
+    }
+
+    public void ResetErrorStats()
+    {
+        lock (_lock)
+        {
+            _minErrDeg = double.PositiveInfinity;
+            _maxErrDeg = double.NegativeInfinity;
+            _sumAbsErrDeg = 0;
+            _errCount = 0;
+            _instantErrorDeg = 0;
         }
     }
 
@@ -208,7 +273,6 @@ internal sealed class EncoderState
             _lastSpeedAngle = 0;
             _lastSpeedTime = _timeAccum;
             _synced = false;
-            // 角度清零会改变 ABZ 角度，baseline 必须重学
             _baselineReady = false;
             _baselineErrorSum = 0;
             _baselineErrorCount = 0;
@@ -245,6 +309,18 @@ internal sealed class EncoderState
         _maxDriftDeg = 0;
         _alarmActive = false;
 
+        _abInit = false;
+        _minA = _maxA = _minB = _maxB = 0;
+        _centerA = _offsetA; _centerB = _offsetB;
+        _vppA = _vppB = 0;
+
+        _cdInit = false;
+        _cdCenterReady = false;
+        _minC = _maxC = _minD = _maxD = 0;
+        _centerC = _offsetC; _centerD = _offsetD;
+        _vppC = _vppD = 0;
+        _cdCoverageDeg = 0;
+
         _meanA = _meanB = _meanC = _meanD = 0; _meanInit = false;
         _snapshot = new EncoderSnapshot();
     }
@@ -261,6 +337,7 @@ internal sealed class EncoderState
             double rawC = _cdValid ? ReadRaw(volts, _chCp, _chCn) : 0;
             double rawD = _cdValid ? ReadRaw(volts, _chDp, _chDn) : 0;
 
+            // 均值滑动（“取当前均值”按钮用）
             const double meanAlpha = 0.00002;
             if (!_meanInit)
             {
@@ -278,11 +355,18 @@ internal sealed class EncoderState
                 }
             }
 
-            double a = rawA - _offsetA;
-            double b = rawB - _offsetB;
-            double z = rawZ - _offsetZ;
+            // ===== Vpp 中心更新 =====
+            UpdateCenters(rawA, rawB, rawC, rawD);
 
-            if (_autoCenter && _init)
+            // 去偏
+            double a = rawA - _centerA;
+            double b = rawB - _centerB;
+            double z = rawZ - _offsetZ;
+            double cDemean = _cdValid ? rawC - _centerC : 0;
+            double dDemean = _cdValid ? rawD - _centerD : 0;
+
+            // 固定模式下仍支持慢速自动去偏
+            if (!_autoCenterFromVpp && _autoCenter && _init)
             {
                 const double alpha = 0.00002;
                 _offsetEstA += alpha * ((rawA - _offsetA) - _offsetEstA);
@@ -299,12 +383,10 @@ internal sealed class EncoderState
             // CD 更新
             if (_cdValid)
             {
-                double c = rawC - _offsetC;
-                double d = rawD - _offsetD;
                 const double minCdAmp = 0.005;
-                if (Math.Abs(c) > minCdAmp || Math.Abs(d) > minCdAmp)
+                if (Math.Abs(cDemean) > minCdAmp || Math.Abs(dDemean) > minCdAmp)
                 {
-                    double cd = Math.Atan2(d, c) * 180.0 / Math.PI;
+                    double cd = Math.Atan2(dDemean, cDemean) * 180.0 / Math.PI;
                     if (cd < 0) cd += 360;
                     _cdAngleDeg = cd;
                 }
@@ -315,7 +397,7 @@ internal sealed class EncoderState
             if (Math.Abs(a) < minAmp && Math.Abs(b) < minAmp)
             {
                 _speedRps *= 0.95;
-                EmitSnapshot(a, b, z, rawA, rawB, rawZ, rawC, rawD);
+                EmitSnapshot(a, b, z, cDemean, dDemean, rawA, rawB, rawZ);
                 return;
             }
 
@@ -328,7 +410,7 @@ internal sealed class EncoderState
                 _lastSpeedTime = _timeAccum;
                 _lastSpeedAngle = 0;
                 _init = true;
-                EmitSnapshot(a, b, z, rawA, rawB, rawZ, rawC, rawD);
+                EmitSnapshot(a, b, z, cDemean, dDemean, rawA, rawB, rawZ);
                 return;
             }
 
@@ -367,29 +449,124 @@ internal sealed class EncoderState
                 _lastSpeedAngle = _continuousAngle;
             }
 
-            EmitSnapshot(a, b, z, rawA, rawB, rawZ, rawC, rawD);
+            // C/D 覆盖率累计（用转速×dt 积分，绝对值累加）
+            if (_cdValid && _autoCenterFromVpp && !_cdCenterReady)
+            {
+                if (Math.Abs(_speedRps) >= _cdCenterMinSpeedRps)
+                    _cdCoverageDeg += Math.Abs(_speedRps) * _dtPerFrame * 360.0;
+                if (_cdCoverageDeg >= _cdCoverageTargetDeg)
+                {
+                    _cdCenterReady = true;
+                    _centerC = (_minC + _maxC) * 0.5;
+                    _centerD = (_minD + _maxD) * 0.5;
+                    _vppC = _maxC - _minC;
+                    _vppD = _maxD - _minD;
+                }
+            }
+
+            EmitSnapshot(a, b, z, cDemean, dDemean, rawA, rawB, rawZ);
         }
     }
 
+    /// <summary>更新 A/B 快追踪 + C/D 慢追踪（估计阶段只增不减）</summary>
+    private void UpdateCenters(double rawA, double rawB, double rawC, double rawD)
+    {
+        if (!_autoCenterFromVpp)
+        {
+            _centerA = _offsetA; _centerB = _offsetB;
+            _centerC = _offsetC; _centerD = _offsetD;
+            return;
+        }
+
+        // A/B：滑动衰减 min/max（快追踪，0.5s 时间常数）
+        if (!_abInit)
+        {
+            _minA = _maxA = rawA;
+            _minB = _maxB = rawB;
+            _abInit = true;
+        }
+        else
+        {
+            UpdateRangeSliding(ref _minA, ref _maxA, rawA, _vppTrackAlpha);
+            UpdateRangeSliding(ref _minB, ref _maxB, rawB, _vppTrackAlpha);
+        }
+        _centerA = (_minA + _maxA) * 0.5;
+        _centerB = (_minB + _maxB) * 0.5;
+        _vppA = _maxA - _minA;
+        _vppB = _maxB - _minB;
+
+        // C/D：估计阶段纯 min/max（只增不减）；完成后冻结或极慢追踪
+        if (!_cdValid)
+        {
+            _centerC = _offsetC; _centerD = _offsetD;
+            return;
+        }
+
+        if (!_cdInit)
+        {
+            _minC = _maxC = rawC;
+            _minD = _maxD = rawD;
+            _cdInit = true;
+        }
+
+        if (!_cdCenterReady)
+        {
+            // 纯 min/max，不做衰减 —— 保证转一整圈后精确
+            if (rawC > _maxC) _maxC = rawC;
+            if (rawC < _minC) _minC = rawC;
+            if (rawD > _maxD) _maxD = rawD;
+            if (rawD < _minD) _minD = rawD;
+
+            _vppC = _maxC - _minC;
+            _vppD = _maxD - _minD;
+
+            // 未完成前用 offset 作为临时中心（保证解算能工作）
+            _centerC = _offsetC;
+            _centerD = _offsetD;
+        }
+        else
+        {
+            // 完成后：默认冻结，除非配置了追踪系数
+            if (_cdCenterTrackAlphaAfterReady > 0)
+            {
+                UpdateRangeSliding(ref _minC, ref _maxC, rawC, _cdCenterTrackAlphaAfterReady);
+                UpdateRangeSliding(ref _minD, ref _maxD, rawD, _cdCenterTrackAlphaAfterReady);
+                _centerC = (_minC + _maxC) * 0.5;
+                _centerD = (_minD + _maxD) * 0.5;
+                _vppC = _maxC - _minC;
+                _vppD = _maxD - _minD;
+            }
+            // 冻结时保持 centerC/centerD 不变
+        }
+    }
+
+    /// <summary>滑动衰减 min/max：新高直接更新，否则缓慢向 v 收缩</summary>
+    private static void UpdateRangeSliding(ref double min, ref double max, double v, double alpha)
+    {
+        if (v > max) max = v;
+        else max += alpha * (v - max);
+
+        if (v < min) min = v;
+        else min += alpha * (v - min);
+    }
+
     private void EmitSnapshot(double a, double b, double z,
-                              double rawA, double rawB, double rawZ,
-                              double rawC, double rawD)
+                              double cDemean, double dDemean,
+                              double rawA, double rawB, double rawZ)
     {
         double angleDeg = (_continuousAngle * 180 / Math.PI) % 360;
         if (angleDeg < 0) angleDeg += 360;
         int dir = _speedRps > 0.02 ? 1 : (_speedRps < -0.02 ? -1 : 0);
 
-        double c = _cdValid ? rawC - _offsetC : 0;
-        double d = _cdValid ? rawD - _offsetD : 0;
-
-        // ===== S120 动态漂移监控 =====
+        // ===== 漂移监控 =====
         double err = 0;
+        bool baselineBlocked = _cdValid && _autoCenterFromVpp && !_cdCenterReady;
+
         if (_cdValid && _synced)
         {
             err = Wrap180(angleDeg - _cdAngleDeg);
             _instantErrorDeg = err;
 
-            // 原统计（诊断）
             if (err < _minErrDeg) _minErrDeg = err;
             if (err > _maxErrDeg) _maxErrDeg = err;
             _sumAbsErrDeg += Math.Abs(err);
@@ -397,8 +574,8 @@ internal sealed class EncoderState
 
             if (!_baselineReady)
             {
-                // 学习阶段：速度 < 180 rpm（3 rps）时计入
-                if (Math.Abs(_speedRps) < 3.0)
+                // 关键：C/D 中心估计完成前不学习基准，否则学到错误偏移
+                if (!baselineBlocked && Math.Abs(_speedRps) < 3.0)
                 {
                     _baselineErrorSum += err;
                     _baselineErrorCount++;
@@ -411,7 +588,6 @@ internal sealed class EncoderState
             }
             else
             {
-                // 漂移监控
                 double drift = Wrap180(err - _baselineErrorDeg);
                 _driftDeg = drift;
                 double absDrift = Math.Abs(drift);
@@ -440,8 +616,8 @@ internal sealed class EncoderState
             A = a,
             B = b,
             Z = z,
-            C = c,
-            D = d,
+            C = cDemean,
+            D = dDemean,
             RawA = rawA,
             RawB = rawB,
             RawZ = rawZ,
@@ -467,6 +643,7 @@ internal sealed class EncoderState
             BaselineLearnProgress = _baselineErrorCount,
             BaselineLearnTarget = _baselineLearnTarget,
             BaselineLearnSeconds = _baselineLearnSeconds,
+            BaselineBlockedByCdEstimate = baselineBlocked && !_baselineReady,
 
             MinAngleErrorDeg = _errCount > 0 ? _minErrDeg : 0,
             MaxAngleErrorDeg = _errCount > 0 ? _maxErrDeg : 0,
@@ -477,6 +654,20 @@ internal sealed class EncoderState
             MeanB = _meanB,
             MeanC = _meanC,
             MeanD = _meanD,
+
+            AutoCenterFromVpp = _autoCenterFromVpp,
+            UsedCenterA = _centerA,
+            UsedCenterB = _centerB,
+            UsedCenterC = _centerC,
+            UsedCenterD = _centerD,
+            EstVppA = _vppA,
+            EstVppB = _vppB,
+            EstVppC = _vppC,
+            EstVppD = _vppD,
+
+            CdCenterReady = !_cdValid || !_autoCenterFromVpp || _cdCenterReady,
+            CdCoverageDeg = _cdCoverageDeg,
+            CdCoverageTargetDeg = _cdCoverageTargetDeg,
         };
     }
 
